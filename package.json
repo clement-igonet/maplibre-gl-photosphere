@@ -9,7 +9,9 @@
     ".": "./src/index.js"
   },
   "files": [
-    "src/"
+    "src/",
+    "LICENSE",
+    "README.md"
   ],
   "scripts": {
     "test": "vitest run"
@@ -29,5 +31,13 @@
     "jsdom": "^29.0.0",
     "maplibre-gl": "^5.0.0",
     "vitest": "^4.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/clement-igonet/maplibre-gl-photosphere"
+  },
+  "homepage": "https://github.com/clement-igonet/maplibre-gl-photosphere",
+  "bugs": {
+    "url": "https://github.com/clement-igonet/maplibre-gl-photosphere/issues"
   }
 }
