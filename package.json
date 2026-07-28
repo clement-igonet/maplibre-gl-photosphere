@@ -34,10 +34,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/clement-igonet/maplibre-plugin-photosphere.git"
+    "url": "git+https://github.com/clement-igonet/maplibre-gl-photosphere.git"
   },
-  "homepage": "https://github.com/clement-igonet/maplibre-plugin-photosphere",
+  "homepage": "https://github.com/clement-igonet/maplibre-gl-photosphere",
   "bugs": {
-    "url": "https://github.com/clement-igonet/maplibre-plugin-photosphere/issues"
+    "url": "https://github.com/clement-igonet/maplibre-gl-photosphere/issues"
   }
 }
