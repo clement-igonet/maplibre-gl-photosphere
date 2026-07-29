@@ -23,4 +23,7 @@ jobs:
       - run: npx vitest run
       # Trusted publishing needs npm >= 11.5.1 for the OIDC token exchange.
       - run: npm install -g npm@latest
-      - run: npm publish
+      - run: |
+          npm -v
+          if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then echo "OIDC env present"; else echo "OIDC env MISSING"; fi
+      - run: npm publish --loglevel http
