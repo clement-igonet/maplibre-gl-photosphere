@@ -1,0 +1,26 @@
+name: Release
+
+# Publishes to npm via trusted publishing (OIDC): no tokens, no 2FA prompts.
+# Triggered by pushing a v* tag, or manually for an existing version.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npx vitest run
+      # Trusted publishing needs npm >= 11.5.1 for the OIDC token exchange.
+      - run: npm install -g npm@latest
+      - run: npm publish
