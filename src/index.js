@@ -134,7 +134,7 @@ export class Photosphere {
         return this._mode;
     }
 
-    enter() {
+    enter(target) {
         if (this._mode !== 'outside') {
             return;
         }
@@ -142,7 +142,14 @@ export class Photosphere {
         for (const handler of this._interactionHandlers()) {
             handler.disable();
         }
-        this._yawDeg = 0;
+        // Optionally enter at a specific panorama (used for street-view style
+        // sequences); otherwise enter at the one given to the constructor.
+        if (target && target.lngLat && target.imageUrl) {
+            this._options.lngLat = target.lngLat;
+            this._options.imageUrl = target.imageUrl;
+            this._loadTexture(target.imageUrl);
+        }
+        this._yawDeg = (target && typeof target.bearing === 'number') ? target.bearing : 0;
         this._pitchDeg = 0;
         this._recalibrateLookTargetDistance();
         const {lngLat, zoom, eyeHeight, onEnter} = this._options;
@@ -167,6 +174,47 @@ export class Photosphere {
                 handler.enable();
             }
             if (this._options.onExit) this._options.onExit();
+        });
+    }
+
+    // Loads an equirectangular image into the layer's texture, replacing
+    // whatever was there. Used both for the initial panorama and by goTo.
+    _loadTexture(url, onReady) {
+        const gl = this._gl;
+        const layer = this._layer;
+        if (!gl || !layer.texture) {
+            return;
+        }
+        const image = new Image();
+        image.crossOrigin = 'anonymous';
+        image.onload = () => {
+            gl.bindTexture(gl.TEXTURE_2D, layer.texture);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+            layer.textureReady = true;
+            this._map.triggerRepaint();
+            if (onReady) onReady();
+        };
+        image.src = url;
+    }
+
+    // Moves to an adjacent panorama (street-view style): loads the next
+    // equirectangular image, then swaps the anchor point to its location and
+    // repositions the eye there, preserving the current look direction. The
+    // swap only happens once the next image is decoded, so there is no flash.
+    goTo(target) {
+        if (this._mode !== 'inside' || !target || !target.lngLat || !target.imageUrl) {
+            return;
+        }
+        this._loadTexture(target.imageUrl, () => {
+            this._options.lngLat = target.lngLat;
+            this._options.imageUrl = target.imageUrl;
+            if (typeof target.bearing === 'number') {
+                this._yawDeg = target.bearing;
+            }
+            this._recalibrateLookTargetDistance();
+            this._updateCameraWhileInside();
+            this._map.triggerRepaint();
+            if (this._options.onMove) this._options.onMove(target);
         });
     }
 
@@ -222,15 +270,10 @@ export class Photosphere {
                 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
                 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
-                const image = new Image();
-                image.crossOrigin = 'anonymous';
-                image.onload = () => {
-                    gl.bindTexture(gl.TEXTURE_2D, this.texture);
-                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
-                    this.textureReady = true;
-                    map.triggerRepaint();
-                };
-                image.src = self._options.imageUrl;
+                // Keep gl + texture reachable so the panorama can be swapped
+                // (goTo) after the layer is added, not only at creation.
+                self._gl = gl;
+                self._loadTexture(self._options.imageUrl);
             },
 
             render(gl) {

@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Street view with Panoramax + maplibre-gl-photosphere</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css">
+    <link rel="icon" href="data:,">
+    <style>
+        body { margin: 0; padding: 0; }
+        html, body, #map { height: 100%; }
+        #hint {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1;
+            background: rgba(0, 0, 0, .6);
+            color: #fff;
+            padding: 8px 12px;
+            font: 13px/1.4 system-ui, sans-serif;
+            border-radius: 4px;
+            max-width: 320px;
+        }
+        #nav {
+            position: absolute;
+            bottom: 18px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 1;
+            display: none;
+            gap: 8px;
+        }
+        #nav button {
+            font: 600 15px system-ui, sans-serif;
+            color: #fff;
+            background: rgba(0, 0, 0, .65);
+            border: none;
+            border-radius: 8px;
+            padding: 10px 16px;
+            cursor: pointer;
+        }
+        #nav button:disabled { opacity: .4; cursor: default; }
+    </style>
+    <script src="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js"></script>
+    <script type="importmap">
+        {
+            "imports": {
+                "maplibre-gl": "./maplibre-gl-shim.js",
+                "maplibre-gl-photosphere": "../src/index.js"
+            }
+        }
+    </script>
+</head>
+<body>
+<div id="map"></div>
+<div id="hint">Loading a Panoramax street sequence…</div>
+<div id="nav">
+    <button id="prev" type="button">◀ Back</button>
+    <button id="next" type="button">Forward ▶</button>
+    <button id="exit" type="button">Exit</button>
+</div>
+
+<script type="module">
+    import {Photosphere} from 'maplibre-gl-photosphere';
+
+    // A continuous walk of open 360° street imagery from Panoramax
+    // (OpenStreetMap-France ecosystem), around the 10th arrondissement, Paris.
+    const API = 'https://api.panoramax.xyz/api';
+    const COLLECTION = 'a5dc43dc-d62e-457b-ad15-822bd7ced0db';
+
+    const hint = document.getElementById('hint');
+    const nav = document.getElementById('nav');
+
+    const response = await fetch(`${API}/collections/${COLLECTION}/items?limit=100`);
+    const collection = await response.json();
+    // Keep only equirectangular 360° pictures; they come back in capture order.
+    const sequence = collection.features
+        .filter((f) => f.properties.exif?.['Xmp.GPano.ProjectionType'] === 'equirectangular')
+        .map((f) => ({
+            lngLat: f.geometry.coordinates,
+            imageUrl: f.assets.sd?.href || f.assets.hd.href,
+            bearing: f.properties['view:azimuth'] ?? 0
+        }));
+
+    const map = new maplibregl.Map({
+        container: 'map',
+        style: {
+            version: 8,
+            sources: {
+                osm: {
+                    type: 'raster',
+                    tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+                    tileSize: 256,
+                    maxzoom: 19,
+                    attribution: '&copy; OpenStreetMap contributors | Imagery: Panoramax'
+                }
+            },
+            layers: [{id: 'osm', type: 'raster', source: 'osm'}]
+        },
+        center: sequence[0].lngLat,
+        zoom: 18,
+        pitch: 55,
+        bearing: 0,
+        minPitch: 5,
+        maxPitch: 175,
+        centerClampedToGround: false
+    });
+
+    let index = 0;
+
+    const photosphere = new Photosphere(map, {
+        lngLat: sequence[0].lngLat,
+        imageUrl: sequence[0].imageUrl,
+        exitView: {center: sequence[0].lngLat, zoom: 17, pitch: 55, bearing: 0},
+        onEnter: () => { hint.textContent = 'Drag to look around. Use Forward / Back to walk the street.'; nav.style.display = 'flex'; setRouteVisible('none'); },
+        onExit: () => { hint.textContent = 'Click a point on the route to step into the street.'; nav.style.display = 'none'; setRouteVisible('visible'); }
+    });
+
+    const prevButton = document.getElementById('prev');
+    const nextButton = document.getElementById('next');
+
+    function refreshNav() {
+        prevButton.disabled = index <= 0;
+        nextButton.disabled = index >= sequence.length - 1;
+    }
+
+    function move(delta) {
+        const target = index + delta;
+        if (target < 0 || target >= sequence.length) return;
+        index = target;
+        photosphere.goTo(sequence[index]);
+        map.getSource('sequence-here')?.setData(pointFeature(index));
+        refreshNav();
+    }
+
+    function pointFeature(i) {
+        return {type: 'Feature', geometry: {type: 'Point', coordinates: sequence[i].lngLat}};
+    }
+
+    // The route overlay layers are added after the photosphere custom layer, so
+    // they render on top; hide them while immersed and restore them on exit.
+    function setRouteVisible(visibility) {
+        for (const id of ['route', 'points', 'here']) {
+            if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', visibility);
+        }
+    }
+
+    map.on('load', () => {
+        map.addSource('route', {type: 'geojson', data: {type: 'Feature', geometry: {type: 'LineString', coordinates: sequence.map((p) => p.lngLat)}}});
+        map.addLayer({id: 'route', type: 'line', source: 'route', paint: {'line-color': '#2266ff', 'line-width': 4, 'line-opacity': 0.8}});
+
+        map.addSource('points', {type: 'geojson', data: {type: 'FeatureCollection', features: sequence.map((p, i) => ({type: 'Feature', properties: {i}, geometry: {type: 'Point', coordinates: p.lngLat}}))}});
+        map.addLayer({id: 'points', type: 'circle', source: 'points', paint: {'circle-radius': 4, 'circle-color': '#fff', 'circle-stroke-color': '#2266ff', 'circle-stroke-width': 2}});
+
+        map.addSource('sequence-here', {type: 'geojson', data: pointFeature(0)});
+        map.addLayer({id: 'here', type: 'circle', source: 'sequence-here', paint: {'circle-radius': 7, 'circle-color': '#ff3355'}});
+
+        hint.textContent = 'Click a point on the route to step into the street.';
+        map.on('click', 'points', (event) => {
+            if (photosphere.mode !== 'outside') return;
+            index = event.features[0].properties.i;
+            map.getSource('sequence-here').setData(pointFeature(index));
+            refreshNav();
+            photosphere.enter(sequence[index]);
+        });
+        map.on('mouseenter', 'points', () => { map.getCanvas().style.cursor = 'pointer'; });
+        map.on('mouseleave', 'points', () => { map.getCanvas().style.cursor = ''; });
+    });
+
+    // Keep the "here" dot in sync as goTo moves along the sequence.
+    photosphere._options.onMove = () => map.getSource('sequence-here')?.setData(pointFeature(index));
+
+    prevButton.addEventListener('click', () => move(-1));
+    nextButton.addEventListener('click', () => move(1));
+    document.getElementById('exit').addEventListener('click', () => photosphere.exit());
+    refreshNav();
+</script>
+</body>
+</html>
