@@ -1,4 +1,14 @@
-import {MercatorCoordinate} from 'maplibre-gl';
+// maplibre-gl-photosphere — immersive 360° photosphere plugin for MapLibre GL JS.
+//
+// The layer renders through MapLibre's CustomLayerInterface: a full-screen
+// fragment shader ray-casts each pixel against a finite sphere centered on the
+// anchor and samples the equirectangular texture. Includes Street-View-style
+// sequence navigation (enter/goTo with a smooth zoom-crossfade walk), keyboard/
+// touch look + FOV zoom, photo↔vector blending, in-shader ground navigation
+// arrows and neighbour dots (never clipped by the map near plane), and
+// per-panorama orientation (heading yaw offset for panoramas whose image centre
+// does not face their recorded azimuth).
+import { MercatorCoordinate } from 'maplibre-gl';
 
 const VERTEX_SHADER_SOURCE = `
     attribute vec2 aPosition;
@@ -9,12 +19,11 @@ const VERTEX_SHADER_SOURCE = `
     }
 `;
 
-// Ray-casts each screen pixel (from the current yaw/pitch/FOV) against the
-// photosphere modeled as a finite sphere centered on its anchor point, then
-// samples the panorama texture by the direction from the sphere's center to
-// the intersection. While the eye sits at the center this reduces to plain
-// direction sampling; while approaching it during the enter transition the
-// offset gives real parallax.
+const MAX_ARROWS = 6;
+const ARROW_GROUND_DIST = 5; // where a ground arrow sits, from the eye (m)
+const MAX_POIS = 12;
+const POI_RADIUS_M = 0.85; // ground radius of a neighbour-panorama dot (m)
+const POI_PICK_RADIUS_M = 1.1;
 const FRAGMENT_SHADER_SOURCE = `
     precision highp float;
     varying vec2 vNdc;
@@ -26,6 +35,52 @@ const FRAGMENT_SHADER_SOURCE = `
     uniform vec3 uSphereCenterOffset;
     uniform float uSphereRadius;
     uniform sampler2D uPanorama;
+    // Second sphere + crossfade weight, used only while walking between two
+    // panoramas so the camera dollies across instead of teleporting (#5b).
+    uniform vec3 uSphereCenterOffset2;
+    uniform sampler2D uPanorama2;
+    uniform float uMix;            // 0 = current pano only, 1 = next pano only
+    uniform float uPanoYaw;        // world azimuth (rad) the current image centre faces (#52)
+    uniform float uPanoYaw2;       // ...and the next image's, during a walk
+    uniform vec2 uWalkDir;         // unit horizontal travel direction (east, north) during a walk (#64)
+    uniform float uEyeHeight;      // eye height above the ground (m)
+    uniform int uArrowCount;
+    uniform vec2 uArrows[${MAX_ARROWS}]; // ground positions (east, north) m from the eye
+    uniform int uPoiCount;
+    uniform vec2 uPois[${MAX_POIS}];     // neighbour-pano ground positions (east, north) m
+
+    // Ray-cast one panorama sphere; returns rgb + hit-alpha (a = 0 on a miss).
+    // panoYaw (radians) is the world azimuth the image centre (u = 0.5) faces —
+    // Panoramax stores this as view:azimuth, so subtracting it aligns the photo
+    // to the map/vector world instead of assuming the centre points north (#52).
+    vec4 sampleSphere(vec3 viewDir, vec3 centerOffset, sampler2D tex, float panoYaw) {
+        vec3 originToCenter = -centerOffset;
+        float b = dot(originToCenter, viewDir);
+        float c = dot(originToCenter, originToCenter) - uSphereRadius * uSphereRadius;
+        float discriminant = b * b - c;
+        if (discriminant < 0.0) return vec4(0.0);
+        float sq = sqrt(discriminant);
+        float tNear = -b - sq;
+        float tFar = -b + sq;
+        float t = tNear > 0.0 ? tNear : tFar;
+        if (t < 0.0) return vec4(0.0);
+        vec3 normal = normalize(viewDir * t - centerOffset);
+        float theta = atan(normal.x, normal.y) - panoYaw;
+        float phi = asin(clamp(normal.z, -1.0, 1.0));
+        vec4 color = texture2D(tex, vec2(0.5 + theta / (2.0 * 3.14159265359), 0.5 - phi / 3.14159265359));
+        return vec4(color.rgb, color.a);
+    }
+
+    // A filled arrowhead in the arrow's local frame (x = right, y = forward),
+    // tapering from a base to a tip that points toward the target.
+    float arrowMask(vec2 lp) {
+        float base = -0.7, tip = 1.7, halfW = 1.15;
+        if (lp.y < base || lp.y > tip) return 0.0;
+        float f = (lp.y - base) / (tip - base);         // 0 at base .. 1 at tip
+        float w = halfW * (1.0 - f);                     // taper to a point
+        return abs(lp.x) < w ? 1.0 : 0.0;
+    }
+
     void main() {
         float tanHalfFovY = tan(uFovY * 0.5);
         float tanHalfFovX = tanHalfFovY * uAspect;
@@ -37,34 +92,79 @@ const FRAGMENT_SHADER_SOURCE = `
 
         vec3 viewDir = normalize(forward + right * (vNdc.x * tanHalfFovX) + up * (vNdc.y * tanHalfFovY));
 
-        vec3 originToCenter = -uSphereCenterOffset;
-        float b = dot(originToCenter, viewDir);
-        float c = dot(originToCenter, originToCenter) - uSphereRadius * uSphereRadius;
-        float discriminant = b * b - c;
-        if (discriminant < 0.0) {
-            discard;
+        // Base colour: the panorama sphere. While walking (uMix > 0) the next
+        // panorama cross-fades in. Both panos are sampled DIRECTION-ONLY during
+        // the walk — ray-casting finite spheres from a moving eye shows the
+        // destination sphere's near surface, i.e. its REAR view, which made
+        // walking forward look like moving backward (#64). The forward cue is a
+        // directional zoom instead: the current pano magnifies toward the travel
+        // direction while the next starts slightly wide and settles to 1:1
+        // (Street-View-style); the map camera still dollies for vector parallax.
+        vec3 rgb;
+        float a;
+        if (uMix > 0.0) {
+            vec3 wd = vec3(uWalkDir.x, uWalkDir.y, 0.0);
+            vec3 d1 = normalize(viewDir + wd * (0.85 * uMix));         // zoom in, growing
+            vec3 d2 = normalize(viewDir - wd * (0.30 * (1.0 - uMix))); // settle from wide
+            vec4 s1 = sampleSphere(d1, vec3(0.0), uPanorama, uPanoYaw);
+            vec4 s2 = sampleSphere(d2, vec3(0.0), uPanorama2, uPanoYaw2);
+            rgb = mix(s1.rgb, s2.rgb, uMix);
+            a = mix(s1.a, s2.a, uMix) * uAlpha;
+        } else {
+            vec4 s1 = sampleSphere(viewDir, uSphereCenterOffset, uPanorama, uPanoYaw);
+            rgb = s1.rgb;
+            a = s1.a * uAlpha;
         }
-        float sqrtDiscriminant = sqrt(discriminant);
-        float tNear = -b - sqrtDiscriminant;
-        float tFar = -b + sqrtDiscriminant;
-        float t = tNear > 0.0 ? tNear : tFar;
-        if (t < 0.0) {
-            discard;
+
+        // Ground navigation overlays, drawn on the floor plane at z = -uEyeHeight.
+        // Rendered here (in the panorama layer) they cover the whole viewport and
+        // are never clipped by MapLibre's map-plane near clip (mapmax #26, #39).
+        if (viewDir.z < -0.0001 && (uArrowCount > 0 || uPoiCount > 0)) {
+            float tg = -uEyeHeight / viewDir.z;
+            vec2 g = viewDir.xy * tg;                    // ground point (east, north) m
+
+            // Neighbour-panorama dots at their real ground position: a blue disc
+            // with a white rim. Round and flat on the street — never the cropped,
+            // blown-up blobs a map-plane circle layer gives at grazing pitch.
+            for (int i = 0; i < ${MAX_POIS}; i++) {
+                if (i >= uPoiCount) break;
+                float d = length(g - uPois[i]);
+                if (d < ${POI_RADIUS_M.toFixed(2)}) {
+                    rgb = mix(rgb, vec3(0.16, 0.4, 1.0), 0.9);
+                    a = max(a, 0.9);
+                } else if (d < ${(POI_RADIUS_M + 0.16).toFixed(2)}) {
+                    rgb = mix(rgb, vec3(1.0), 0.9);      // white rim
+                    a = max(a, 0.9);
+                }
+            }
+
+            // Walk arrows, on top of the dots.
+            float mask = 0.0;
+            for (int i = 0; i < ${MAX_ARROWS}; i++) {
+                if (i >= uArrowCount) break;
+                vec2 ap = uArrows[i];
+                if (dot(ap, ap) < 1e-4) continue;
+                vec2 fwd = normalize(ap);
+                vec2 rgt = vec2(fwd.y, -fwd.x);
+                vec2 d = g - ap;
+                mask = max(mask, arrowMask(vec2(dot(d, rgt), dot(d, fwd))));
+            }
+            if (mask > 0.0) {
+                rgb = mix(rgb, vec3(1.0), 0.85);         // white arrow over the photo
+                a = max(a, 0.85);                        // always visible, any blend
+            }
         }
 
-        vec3 intersection = viewDir * t;
-        vec3 normal = normalize(intersection - uSphereCenterOffset);
-
-        float theta = atan(normal.x, normal.y);
-        float phi = asin(clamp(normal.z, -1.0, 1.0));
-
-        float u = 0.5 + theta / (2.0 * 3.14159265359);
-        float v = 0.5 - phi / 3.14159265359;
-
-        vec4 color = texture2D(uPanorama, vec2(u, v));
-        gl_FragColor = vec4(color.rgb, color.a * uAlpha);
+        if (a <= 0.0) discard;
+        gl_FragColor = vec4(rgb, a);
     }
 `;
+
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const normalize3 = (v) => {
+    const l = Math.hypot(v[0], v[1], v[2]) || 1;
+    return [v[0] / l, v[1] / l, v[2] / l];
+};
 
 function compileShader(gl, type, source) {
     const shader = gl.createShader(type);
@@ -81,6 +181,7 @@ const DEFAULT_OPTIONS = {
     zoom: 18,
     radius: 6,
     durationMs: 1500,
+    walkMs: 650, // dolly time when walking to an adjacent panorama (#5b)
     dragSensitivity: 0.15,
     minPitch: -85,
     maxPitch: 85,
@@ -88,17 +189,9 @@ const DEFAULT_OPTIONS = {
 };
 
 /**
- * An immersive 360-degree photosphere anchored at a geographic point,
- * rendered through MapLibre's CustomLayerInterface.
- *
- * const photosphere = new Photosphere(map, {
- *     lngLat: [2.286828, 48.856625],
- *     imageUrl: 'panorama.jpg',
- *     onEnter: () => {},
- *     onExit: () => {}
- * });
- * photosphere.enter();
- * photosphere.exit();
+ * An immersive 360° photosphere anchored at a geographic point, rendered
+ * through MapLibre's CustomLayerInterface. Supports Street-View-style sequence
+ * navigation via enter(target) / goTo(target).
  */
 export class Photosphere {
     constructor(map, options) {
@@ -106,58 +199,294 @@ export class Photosphere {
             throw new Error('Photosphere requires lngLat and imageUrl options');
         }
         this._map = map;
-        this._options = {...DEFAULT_OPTIONS, ...options};
+        this._options = { ...DEFAULT_OPTIONS, ...options };
         this._mode = 'outside';
         this._yawDeg = 0;
         this._pitchDeg = 0;
         this._dragging = false;
         this._lookTargetDistanceMetres = 1;
         this._opacity = 0;
+        this._blend = 1; // steady-state opacity while inside (1 = photo only)
+        this._savedFov = null; // map's vertical FOV before entering
+        this._navArrows = []; // [{ bearing (deg), id }] rendered on the floor
+        this._navPois = []; //   [{ east, north (m from eye), id }] floor dots
         this._sphereCenterOffset = [0, 0, 0];
+        this._sphereCenterOffset2 = [0, 0, 0]; // next pano while walking (#5b)
+        this._mix = 0; // crossfade weight during a walk transition
+        this._transitioning = false;
+        this._panoYawDeg = 0; //  world azimuth the current image centre faces (#52)
+        this._panoYawDeg2 = 0; // ...the next image's, during a walk
+        this._walkDir = [0, 0]; // unit (east, north) travel direction during a walk (#64)
+        this._gl = null;
+        this._layerCtx = null;
 
         this._layer = this._createLayer();
-        if (map.style && map.loaded()) {
-            map.addLayer(this._layer);
+        // MapLibre 6's internal `map.style` is not a truthy public property, so
+        // the old `map.style && map.loaded()` guard fell through to a 'load'
+        // listener that never fires when the style is already loaded — leaving
+        // the custom layer unadded (onAdd never runs, textures never load).
+        // Use the public isStyleLoaded() and add immediately when ready.
+        const addLayer = () => {
+            if (!map.getLayer(this._layer.id)) map.addLayer(this._layer);
+        };
+        if (map.isStyleLoaded()) {
+            addLayer();
         } else {
-            map.on('load', () => map.addLayer(this._layer));
+            map.once('load', addLayer);
+            map.once('styledata', addLayer);
         }
 
+        this._pinchDist = 0;
         this._onMouseDown = this._onMouseDown.bind(this);
         this._onMouseMove = this._onMouseMove.bind(this);
         this._onMouseUp = this._onMouseUp.bind(this);
-        map.getContainer().addEventListener('mousedown', this._onMouseDown);
+        this._onTouchStart = this._onTouchStart.bind(this);
+        this._onTouchMove = this._onTouchMove.bind(this);
+        this._onTouchEnd = this._onTouchEnd.bind(this);
+        const container = map.getContainer();
+        container.addEventListener('mousedown', this._onMouseDown);
         addEventListener('mousemove', this._onMouseMove);
         addEventListener('mouseup', this._onMouseUp);
+        container.addEventListener('touchstart', this._onTouchStart, { passive: false });
+        container.addEventListener('touchmove', this._onTouchMove, { passive: false });
+        container.addEventListener('touchend', this._onTouchEnd);
     }
 
     get mode() {
         return this._mode;
     }
 
+    get lngLat() {
+        return this._options.lngLat;
+    }
+
+    // Steady-state photo opacity while inside — lets vector layers behind the
+    // sphere show through for photo↔mixed↔vector blending (mapmax #6).
+    blend(alpha) {
+        this._blend = Math.max(0, Math.min(1, alpha));
+        this._map.triggerRepaint();
+    }
+
+    get yaw() { return this._yawDeg; }
+    get pitch() { return this._pitchDeg; }
+
+    // Ground navigation arrows rendered inside the panorama layer (mapmax #26).
+    // `list` = [{ bearing (deg toward the target), id }].
+    setNavArrows(list) {
+        this._navArrows = Array.isArray(list) ? list.slice(0, MAX_ARROWS) : [];
+        this._map.triggerRepaint();
+    }
+
+    // Neighbour-panorama dots rendered on the floor (mapmax #39).
+    // `list` = [{ east, north (m from the eye), id }].
+    setNavPois(list) {
+        this._navPois = Array.isArray(list) ? list.slice(0, MAX_POIS) : [];
+        this._map.triggerRepaint();
+    }
+
+    // The id of the arrow or POI dot under screen pixel (px, py), or null. Ray-
+    // casts the floor with the same view maths as the shader (works at any pitch).
+    groundPick(px, py) {
+        const canvas = this._map.getCanvas();
+        const w = canvas.clientWidth;
+        const h = canvas.clientHeight;
+        const ndcX = (px / w) * 2 - 1;
+        const ndcY = 1 - (py / h) * 2;
+        const tanY = Math.tan((this._options.fov * Math.PI / 180) / 2);
+        const tanX = tanY * (w / h);
+        const yaw = this._yawDeg * Math.PI / 180;
+        const pitch = this._pitchDeg * Math.PI / 180;
+        const forward = [Math.cos(pitch) * Math.sin(yaw), Math.cos(pitch) * Math.cos(yaw), Math.sin(pitch)];
+        const right = normalize3(cross3(forward, [0, 0, 1]));
+        const up = cross3(right, forward);
+        const vd = normalize3([
+            forward[0] + right[0] * ndcX * tanX + up[0] * ndcY * tanY,
+            forward[1] + right[1] * ndcX * tanX + up[1] * ndcY * tanY,
+            forward[2] + right[2] * ndcX * tanX + up[2] * ndcY * tanY,
+        ]);
+        if (vd[2] >= -1e-4) return null; // not looking at the floor
+        const t = -this._options.eyeHeight / vd[2];
+        const g = [vd[0] * t, vd[1] * t];
+        for (const a of this._navArrows) {
+            const br = a.bearing * Math.PI / 180;
+            const ap = [ARROW_GROUND_DIST * Math.sin(br), ARROW_GROUND_DIST * Math.cos(br)];
+            const len = Math.hypot(ap[0], ap[1]) || 1;
+            const fwd = [ap[0] / len, ap[1] / len];
+            const rgt = [fwd[1], -fwd[0]];
+            const d = [g[0] - ap[0], g[1] - ap[1]];
+            const ly = d[0] * fwd[0] + d[1] * fwd[1];
+            const lx = d[0] * rgt[0] + d[1] * rgt[1];
+            const base = -0.7, tip = 1.7, halfW = 1.15;
+            if (ly > base && ly < tip && Math.abs(lx) < halfW * (1 - (ly - base) / (tip - base))) {
+                return a.id;
+            }
+        }
+        for (const p of this._navPois) {
+            if (Math.hypot(g[0] - p.east, g[1] - p.north) < POI_PICK_RADIUS_M) return p.id;
+        }
+        return null;
+    }
+
+    // Look around by a delta (degrees) — drives keyboard / touch controls
+    // outside the built-in mouse drag (mapmax #7).
+    look(deltaYawDeg, deltaPitchDeg) {
+        if (this._mode !== 'inside') return;
+        const { minPitch, maxPitch } = this._options;
+        this._yawDeg = (this._yawDeg + deltaYawDeg + 360) % 360;
+        this._pitchDeg = Math.max(minPitch, Math.min(maxPitch, this._pitchDeg + deltaPitchDeg));
+        this._updateCameraWhileInside();
+        this._map.triggerRepaint();
+    }
+
+    // Field-of-view zoom (degrees), clamped — scroll wheel / pinch (mapmax #7).
+    zoomFov(deltaDeg) {
+        this._options.fov = Math.max(25, Math.min(100, this._options.fov + deltaDeg));
+        this._applyMapFov();
+        if (this._mode === 'inside') {
+            this._recalibrateLookTargetDistance();
+            this._updateCameraWhileInside();
+        }
+        this._map.triggerRepaint();
+    }
+
+    // Keep MapLibre's vertical FOV equal to the sphere shader's FOV so the photo
+    // and the vector layers move at the same rate — no desync (mapmax #24).
+    _applyMapFov() {
+        const map = this._map;
+        if (typeof map.setVerticalFieldOfView === 'function') {
+            map.setVerticalFieldOfView(this._options.fov);
+        } else if (map.transform) {
+            map.transform.fov = this._options.fov;
+        }
+    }
+
+    // Enter the photosphere. Optional target = {lngLat, imageUrl, bearing}
+    // retargets to a specific panorama first (used for street-view sequences).
     enter(target) {
         if (this._mode !== 'outside') {
             return;
+        }
+        if (target) {
+            if (target.lngLat) this._options.lngLat = target.lngLat;
+            if (target.imageUrl) {
+                this._options.imageUrl = target.imageUrl;
+                this._loadTexture(target.imageUrl);
+            }
         }
         this._mode = 'entering';
         for (const handler of this._interactionHandlers()) {
             handler.disable();
         }
-        // Optionally enter at a specific panorama (used for street-view style
-        // sequences); otherwise enter at the one given to the constructor.
-        if (target && target.lngLat && target.imageUrl) {
-            this._options.lngLat = target.lngLat;
-            this._options.imageUrl = target.imageUrl;
-            this._loadTexture(target.imageUrl);
+        // Match the map's vertical FOV to the sphere's so photo and vector move
+        // together (mapmax #24). Do it before recalibrating (which reads the fov).
+        if (typeof this._map.getVerticalFieldOfView === 'function') {
+            this._savedFov = this._map.getVerticalFieldOfView();
         }
-        this._yawDeg = (target && typeof target.bearing === 'number') ? target.bearing : 0;
+        this._applyMapFov();
+        // Start looking toward the picture's heading, if provided. That heading
+        // is also the world azimuth the image centre faces, so the shader rotates
+        // the texture by it to align the photo with the vector world (#52).
+        const heading = target && typeof target.bearing === 'number' ? target.bearing : 0;
+        this._yawDeg = heading;
+        // The image centre's world azimuth may differ from the look/travel
+        // heading (backward-mounted cameras, sun-compass corrected — #66).
+        this._panoYawDeg = (target && typeof target.panoYaw === 'number') ? target.panoYaw : heading;
         this._pitchDeg = 0;
         this._recalibrateLookTargetDistance();
-        const {lngLat, zoom, eyeHeight, onEnter} = this._options;
-        this._animate({center: lngLat, zoom, pitch: 90, bearing: 0}, eyeHeight, 1, () => {
+        const { lngLat, zoom, eyeHeight, onEnter } = this._options;
+        this._animate({ center: lngLat, zoom, pitch: 90, bearing: this._yawDeg }, eyeHeight, 1, () => {
             this._mode = 'inside';
             this._updateCameraWhileInside();
             if (onEnter) onEnter();
         });
+    }
+
+    // Walk to an adjacent panorama while inside. Preloads the next equirectangular
+    // image into the second texture, then dollies the eye from the current anchor
+    // to the target while cross-fading the two spheres — a smooth translation,
+    // not a teleport (#5b). Preserves the current look direction. Fires onMove.
+    goTo(target) {
+        if (this._mode !== 'inside' || this._transitioning || !target || !target.imageUrl) {
+            return;
+        }
+        const fromAnchor = this._options.lngLat;
+        const toAnchor = target.lngLat || fromAnchor;
+        // Orient the next sphere by its own heading during the crossfade (#52).
+        this._panoYawDeg2 = typeof target.panoYaw === 'number' ? target.panoYaw
+            : typeof target.bearing === 'number' ? target.bearing : this._panoYawDeg;
+        this._loadInto('texture2', target.imageUrl, (err) => {
+            if (this._mode !== 'inside') return;
+            if (err) { // fall back to an instant swap rather than getting stuck
+                this._finishTransition(toAnchor, target.imageUrl, target);
+                return;
+            }
+            this._runTransition(fromAnchor, toAnchor, target);
+        });
+    }
+
+    // Animate the walk from `fromAnchor` to `toAnchor`. The panos themselves are
+    // sampled direction-only with a directional zoom toward the travel direction
+    // (see the shader, #64) — finite-sphere ray-casting from the moving eye showed
+    // the destination's REAR view and read as backward motion. The map camera
+    // still dollies so the vector layers give true forward parallax.
+    _runTransition(fromAnchor, toAnchor, target) {
+        this._transitioning = true;
+        const fromM = MercatorCoordinate.fromLngLat(fromAnchor);
+        const toM = MercatorCoordinate.fromLngLat(toAnchor);
+        // Unit (east, north) travel direction for the shader zoom (#64).
+        const dE = toM.x - fromM.x;
+        const dN = -(toM.y - fromM.y); // mercator y grows southward
+        const dLen = Math.hypot(dE, dN) || 1;
+        this._walkDir = [dE / dLen, dN / dLen];
+        this._sphereCenterOffset = [0, 0, 0];
+        this._sphereCenterOffset2 = [0, 0, 0];
+        const durationMs = this._options.walkMs;
+        const startTime = performance.now();
+        const step = (now) => {
+            if (this._mode !== 'inside') { this._endTransitionState(); return; }
+            const t = Math.min(1, (now - startTime) / durationMs);
+            const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+            const eye = [
+                fromAnchor[0] + (toAnchor[0] - fromAnchor[0]) * eased,
+                fromAnchor[1] + (toAnchor[1] - fromAnchor[1]) * eased,
+            ];
+            this._mix = eased;
+            this._positionEyeAt(eye);
+            this._map.triggerRepaint();
+            if (t < 1) requestAnimationFrame(step);
+            else this._finishTransition(toAnchor, target.imageUrl, target);
+        };
+        requestAnimationFrame(step);
+    }
+
+    // Promote the next panorama to current: swap textures (texture2 already holds
+    // it), reset the offsets/crossfade, and settle the eye at the new anchor.
+    _finishTransition(toAnchor, imageUrl, target) {
+        const layer = this._layerCtx;
+        if (layer) {
+            const tmp = layer.texture;
+            layer.texture = layer.texture2;
+            layer.texture2 = tmp;
+            layer.textureReady = true;
+        }
+        this._options.lngLat = toAnchor;
+        this._options.imageUrl = imageUrl;
+        // Promote the next pano's heading to current (#52).
+        if (typeof target.panoYaw === 'number') this._panoYawDeg = target.panoYaw;
+        else if (typeof target.bearing === 'number') this._panoYawDeg = target.bearing;
+        this._endTransitionState();
+        this._recalibrateLookTargetDistance();
+        this._updateCameraWhileInside();
+        this._map.triggerRepaint();
+        if (this._options.onMove) this._options.onMove(target);
+    }
+
+    _endTransitionState() {
+        this._sphereCenterOffset = [0, 0, 0];
+        this._sphereCenterOffset2 = [0, 0, 0];
+        this._walkDir = [0, 0];
+        this._mix = 0;
+        this._transitioning = false;
     }
 
     exit() {
@@ -170,6 +499,11 @@ export class Photosphere {
         };
         this._animate(view, 0, 0, () => {
             this._mode = 'outside';
+            // Restore the map's original vertical FOV (mapmax #24).
+            if (this._savedFov != null && typeof this._map.setVerticalFieldOfView === 'function') {
+                this._map.setVerticalFieldOfView(this._savedFov);
+                this._savedFov = null;
+            }
             for (const handler of this._interactionHandlers()) {
                 handler.enable();
             }
@@ -177,52 +511,15 @@ export class Photosphere {
         });
     }
 
-    // Loads an equirectangular image into the layer's texture, replacing
-    // whatever was there. Used both for the initial panorama and by goTo.
-    _loadTexture(url, onReady) {
-        const gl = this._gl;
-        const layer = this._layer;
-        if (!gl || !layer.texture) {
-            return;
-        }
-        const image = new Image();
-        image.crossOrigin = 'anonymous';
-        image.onload = () => {
-            gl.bindTexture(gl.TEXTURE_2D, layer.texture);
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
-            layer.textureReady = true;
-            this._map.triggerRepaint();
-            if (onReady) onReady();
-        };
-        image.src = url;
-    }
-
-    // Moves to an adjacent panorama (street-view style): loads the next
-    // equirectangular image, then swaps the anchor point to its location and
-    // repositions the eye there, preserving the current look direction. The
-    // swap only happens once the next image is decoded, so there is no flash.
-    goTo(target) {
-        if (this._mode !== 'inside' || !target || !target.lngLat || !target.imageUrl) {
-            return;
-        }
-        this._loadTexture(target.imageUrl, () => {
-            this._options.lngLat = target.lngLat;
-            this._options.imageUrl = target.imageUrl;
-            if (typeof target.bearing === 'number') {
-                this._yawDeg = target.bearing;
-            }
-            this._recalibrateLookTargetDistance();
-            this._updateCameraWhileInside();
-            this._map.triggerRepaint();
-            if (this._options.onMove) this._options.onMove(target);
-        });
-    }
-
     remove() {
         const map = this._map;
-        map.getContainer().removeEventListener('mousedown', this._onMouseDown);
+        const container = map.getContainer();
+        container.removeEventListener('mousedown', this._onMouseDown);
         removeEventListener('mousemove', this._onMouseMove);
         removeEventListener('mouseup', this._onMouseUp);
+        container.removeEventListener('touchstart', this._onTouchStart);
+        container.removeEventListener('touchmove', this._onTouchMove);
+        container.removeEventListener('touchend', this._onTouchEnd);
         if (map.getLayer(this._layer.id)) {
             map.removeLayer(this._layer.id);
         }
@@ -233,10 +530,35 @@ export class Photosphere {
         return [map.dragPan, map.dragRotate, map.scrollZoom, map.doubleClickZoom, map.touchZoomRotate, map.keyboard];
     }
 
+    // Refactored image → texture load, reusable after the layer exists (not
+    // only at creation). No-op until onAdd has stored the gl + layer context.
+    // `slot` picks which texture to fill: 'texture' (current) or 'texture2'
+    // (the next panorama, preloaded for a walk transition #5b).
+    _loadInto(slot, url, onReady) {
+        const gl = this._gl;
+        const layer = this._layerCtx;
+        if (!gl || !layer) return;
+        const image = new Image();
+        image.crossOrigin = 'anonymous';
+        image.onload = () => {
+            gl.bindTexture(gl.TEXTURE_2D, layer[slot]);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+            if (slot === 'texture') layer.textureReady = true;
+            this._map.triggerRepaint();
+            if (onReady) onReady();
+        };
+        image.onerror = () => onReady && onReady(new Error(`photosphere image failed: ${url}`));
+        image.src = url;
+    }
+
+    _loadTexture(url, onReady) {
+        this._loadInto('texture', url, onReady);
+    }
+
     _createLayer() {
         const self = this;
         return {
-            id: `photosphere-${Math.round(this._options.lngLat[0] * 1e6)}-${Math.round(this._options.lngLat[1] * 1e6)}`,
+            id: 'photosphere',
             type: 'custom',
             renderingMode: '2d',
 
@@ -253,7 +575,7 @@ export class Photosphere {
 
                 this.aPosition = gl.getAttribLocation(this.program, 'aPosition');
                 this.uniforms = {};
-                for (const name of ['uYaw', 'uPitch', 'uFovY', 'uAspect', 'uAlpha', 'uSphereCenterOffset', 'uSphereRadius', 'uPanorama']) {
+                for (const name of ['uYaw', 'uPitch', 'uFovY', 'uAspect', 'uAlpha', 'uSphereCenterOffset', 'uSphereRadius', 'uPanorama', 'uSphereCenterOffset2', 'uPanorama2', 'uMix', 'uPanoYaw', 'uPanoYaw2', 'uWalkDir', 'uEyeHeight', 'uArrowCount', 'uArrows', 'uPoiCount', 'uPois']) {
                     this.uniforms[name] = gl.getUniformLocation(this.program, name);
                 }
 
@@ -261,18 +583,26 @@ export class Photosphere {
                 gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
                 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
 
+                // REPEAT horizontally so the equirectangular seam behind the
+                // camera wraps seamlessly (WebGL2/NPOT — MapLibre 6). Clamp
+                // vertically at the poles (mapmax #40). texture2 holds the next
+                // panorama during a walk transition (#5b).
+                const makeTexture = () => {
+                    const tex = gl.createTexture();
+                    gl.bindTexture(gl.TEXTURE_2D, tex);
+                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]));
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                    return tex;
+                };
                 this.textureReady = false;
-                this.texture = gl.createTexture();
-                gl.bindTexture(gl.TEXTURE_2D, this.texture);
-                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]));
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                this.texture = makeTexture();
+                this.texture2 = makeTexture();
 
-                // Keep gl + texture reachable so the panorama can be swapped
-                // (goTo) after the layer is added, not only at creation.
                 self._gl = gl;
+                self._layerCtx = this;
                 self._loadTexture(self._options.imageUrl);
             },
 
@@ -296,9 +626,42 @@ export class Photosphere {
                 gl.uniform1f(this.uniforms.uPitch, self._pitchDeg * Math.PI / 180);
                 gl.uniform1f(this.uniforms.uFovY, self._options.fov * Math.PI / 180);
                 gl.uniform1f(this.uniforms.uAspect, gl.drawingBufferWidth / gl.drawingBufferHeight);
-                gl.uniform1f(this.uniforms.uAlpha, self._opacity);
+                gl.uniform1f(this.uniforms.uAlpha, self._opacity * self._blend);
                 gl.uniform3f(this.uniforms.uSphereCenterOffset, ...self._sphereCenterOffset);
                 gl.uniform1f(this.uniforms.uSphereRadius, self._options.radius);
+
+                // Second sphere + crossfade for the walk transition (#5b).
+                gl.activeTexture(gl.TEXTURE1);
+                gl.bindTexture(gl.TEXTURE_2D, this.texture2);
+                gl.uniform1i(this.uniforms.uPanorama2, 1);
+                gl.uniform3f(this.uniforms.uSphereCenterOffset2, ...self._sphereCenterOffset2);
+                gl.uniform1f(this.uniforms.uMix, self._mix);
+                gl.uniform1f(this.uniforms.uPanoYaw, self._panoYawDeg * Math.PI / 180);
+                gl.uniform1f(this.uniforms.uPanoYaw2, self._panoYawDeg2 * Math.PI / 180);
+                gl.uniform2f(this.uniforms.uWalkDir, self._walkDir[0], self._walkDir[1]);
+
+                // Ground navigation arrows (mapmax #26): positions on the floor,
+                // at a fixed distance toward each target bearing.
+                gl.uniform1f(this.uniforms.uEyeHeight, self._options.eyeHeight);
+                const n = Math.min(MAX_ARROWS, self._navArrows.length);
+                gl.uniform1i(this.uniforms.uArrowCount, n);
+                const buf = new Float32Array(MAX_ARROWS * 2);
+                for (let i = 0; i < n; i++) {
+                    const br = self._navArrows[i].bearing * Math.PI / 180;
+                    buf[i * 2] = ARROW_GROUND_DIST * Math.sin(br);
+                    buf[i * 2 + 1] = ARROW_GROUND_DIST * Math.cos(br);
+                }
+                gl.uniform2fv(this.uniforms.uArrows, buf);
+
+                // Neighbour-panorama dots at their real ground offsets (#39).
+                const np = Math.min(MAX_POIS, self._navPois.length);
+                gl.uniform1i(this.uniforms.uPoiCount, np);
+                const pbuf = new Float32Array(MAX_POIS * 2);
+                for (let i = 0; i < np; i++) {
+                    pbuf[i * 2] = self._navPois[i].east;
+                    pbuf[i * 2 + 1] = self._navPois[i].north;
+                }
+                gl.uniform2fv(this.uniforms.uPois, pbuf);
 
                 gl.drawArrays(gl.TRIANGLES, 0, 3);
                 gl.disable(gl.BLEND);
@@ -306,12 +669,8 @@ export class Photosphere {
         };
     }
 
-    // calculateCameraOptionsFromTo() maps an (eye, look-target) pair to
-    // bearing/pitch/zoom without the ground-intersection math that becomes
-    // unstable at pitch 90. The probe measures how zoom encodes the
-    // eye-to-target distance so look targets keep a constant length.
     _recalibrateLookTargetDistance() {
-        const {lngLat, zoom, eyeHeight} = this._options;
+        const { lngLat, zoom, eyeHeight } = this._options;
         const eyeMercator = MercatorCoordinate.fromLngLat(lngLat);
         const probeTarget = new MercatorCoordinate(
             eyeMercator.x, eyeMercator.y - eyeMercator.meterInMercatorCoordinateUnits()).toLngLat();
@@ -320,8 +679,18 @@ export class Photosphere {
     }
 
     _updateCameraWhileInside() {
-        const {lngLat, eyeHeight} = this._options;
-        const eyeMercator = MercatorCoordinate.fromLngLat(lngLat);
+        // During a walk the transition loop drives the eye; don't let a look-drag
+        // snap it back to the old anchor mid-dolly (#5b).
+        if (this._transitioning) return;
+        this._positionEyeAt(this._options.lngLat);
+    }
+
+    // Point the map camera from an eye at `eyeLngLat` (eye height) along the
+    // current yaw/pitch. Generalized so a walk transition can dolly the eye
+    // between two anchors (#5b) while enter/look use the fixed anchor.
+    _positionEyeAt(eyeLngLat) {
+        const { eyeHeight } = this._options;
+        const eyeMercator = MercatorCoordinate.fromLngLat(eyeLngLat);
         const metresToMercatorUnits = eyeMercator.meterInMercatorCoordinateUnits();
 
         const yawRad = this._yawDeg * Math.PI / 180;
@@ -333,13 +702,11 @@ export class Photosphere {
         ).toLngLat();
 
         const cameraOptions = this._map.calculateCameraOptionsFromTo(
-            lngLat, eyeHeight, targetLngLat,
+            eyeLngLat, eyeHeight, targetLngLat,
             eyeHeight + this._lookTargetDistanceMetres * Math.sin(pitchRad));
         this._map.jumpTo(cameraOptions);
     }
 
-    // One camera tween for entering and exiting; feeds the shader the
-    // eye-to-sphere-center offset each frame for the approach parallax.
     _animate(targetView, targetElevation, targetOpacity, onDone) {
         const map = this._map;
         const startTime = performance.now();
@@ -402,7 +769,7 @@ export class Photosphere {
         if (!this._dragging) {
             return;
         }
-        const {dragSensitivity, minPitch, maxPitch} = this._options;
+        const { dragSensitivity, minPitch, maxPitch } = this._options;
         this._yawDeg = (this._yawDeg - (event.clientX - this._lastX) * dragSensitivity + 360) % 360;
         this._pitchDeg = Math.max(minPitch, Math.min(maxPitch,
             this._pitchDeg + (event.clientY - this._lastY) * dragSensitivity));
@@ -414,5 +781,48 @@ export class Photosphere {
 
     _onMouseUp() {
         this._dragging = false;
+    }
+
+    // Touch: one finger looks around, two fingers pinch to zoom FOV (mapmax #7).
+    _onTouchStart(event) {
+        if (this._mode !== 'inside') return;
+        if (event.touches.length === 1) {
+            this._dragging = true;
+            this._lastX = event.touches[0].clientX;
+            this._lastY = event.touches[0].clientY;
+        } else if (event.touches.length === 2) {
+            this._dragging = false;
+            this._pinchDist = this._touchDistance(event);
+        }
+    }
+
+    _onTouchMove(event) {
+        if (this._mode !== 'inside') return;
+        event.preventDefault();
+        const { dragSensitivity, minPitch, maxPitch } = this._options;
+        if (event.touches.length === 1 && this._dragging) {
+            const t = event.touches[0];
+            this._yawDeg = (this._yawDeg - (t.clientX - this._lastX) * dragSensitivity + 360) % 360;
+            this._pitchDeg = Math.max(minPitch, Math.min(maxPitch,
+                this._pitchDeg + (t.clientY - this._lastY) * dragSensitivity));
+            this._lastX = t.clientX;
+            this._lastY = t.clientY;
+            this._updateCameraWhileInside();
+            this._map.triggerRepaint();
+        } else if (event.touches.length === 2 && this._pinchDist) {
+            const d = this._touchDistance(event);
+            this.zoomFov((this._pinchDist - d) * 0.2);
+            this._pinchDist = d;
+        }
+    }
+
+    _onTouchEnd(event) {
+        this._dragging = false;
+        if (!event.touches || event.touches.length < 2) this._pinchDist = 0;
+    }
+
+    _touchDistance(event) {
+        const [a, b] = event.touches;
+        return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
     }
 }

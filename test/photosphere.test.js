@@ -25,12 +25,14 @@ const {Photosphere} = await import('../src/index.js');
 
 function fakeMap() {
     const handler = {enable: vi.fn(), disable: vi.fn()};
+    const layers = new Set();
     return {
         loaded: () => true,
+        isStyleLoaded: () => true,
         style: {},
-        addLayer: vi.fn(),
-        removeLayer: vi.fn(),
-        getLayer: vi.fn(() => true),
+        addLayer: vi.fn((l) => layers.add(l.id)),
+        removeLayer: vi.fn((id) => layers.delete(id)),
+        getLayer: vi.fn((id) => (layers.has(id) ? {id} : undefined)),
         getContainer: () => document.createElement('div'),
         getCenter: () => ({lng: 0, lat: 0}),
         getZoom: () => 17,
