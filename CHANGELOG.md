@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.3.0 — 2026-08-07
+
+Progressive HD tiles. All features are additive; the 0.2.0 API is intact.
+
+### Added
+- **Tiled panorama refinement** (`tiles` option on the constructor and on
+  `enter()`/`goTo()` targets): `{width, cols, rows, url(col, row)}` describes a
+  Panoramax-style tiled HD derivate. The base `imageUrl` still shows first;
+  the texture is then re-allocated as a full-panorama atlas (capped by
+  `MAX_TEXTURE_SIZE`/8192 — tiles downscale on constrained GPUs) seeded with
+  the base image, and the tiles visible from the current camera stream into it
+  with `texSubImage2D`. The fragment shader is untouched: it keeps sampling a
+  single equirectangular texture, so blending, walk transitions and ground
+  overlays work identically on tiled and untiled panoramas.
+- **`visibleTiles()`** (exported, pure — `src/tiles.js`): computes the tiles on
+  screen from yaw/pitch/FOV/aspect/panoYaw by sampling screen rays through the
+  shader's camera basis. Handles the equirectangular seam wrap and adds a full
+  pole row when a pole enters the frustum (grid sampling alone can miss
+  columns there); priority is the angle to the view direction, ×2 on pole rows
+  (mirroring Photo-Sphere-Viewer's equirectangular-tiles-adapter semantics).
+- Refinement scheduling: debounced refresh (150 ms) after every look, FOV
+  zoom, enter and walk arrival; 4 concurrent downloads, most-central tile
+  first; stale in-flight tiles are dropped when the panorama changes. During a
+  `goTo()` walk the crossfade runs against the target's base image and
+  refinement restarts on arrival (Street-View-style).
+- `RULES.md` + `docker-compose.yml`: containerized test (`test`) and demo
+  preview (`web`) services; the reference environment is the `ssh maplibre` VM
+  (podman compose), see RULES.md.
+- The GitHub Pages street-view demo now builds the `tiles` config from the
+  Panoramax STAC tiled-assets fields (`tiles:tile_matrix_sets` +
+  `asset_templates`), so HD sharpens in place as you look around.
+
 ## 0.2.0 — 2026-07-29
 
 Battle-tested in [MapMax](https://github.com/clement-igonet/mapmax) (Panoramax

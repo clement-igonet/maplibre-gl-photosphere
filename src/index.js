@@ -7,8 +7,13 @@
 // touch look + FOV zoom, photo↔vector blending, in-shader ground navigation
 // arrows and neighbour dots (never clipped by the map near plane), and
 // per-panorama orientation (heading yaw offset for panoramas whose image centre
-// does not face their recorded azimuth).
+// does not face their recorded azimuth). Panoramas with a tiled HD derivate
+// (Panoramax-style col/row grids) refine progressively: the texture becomes a
+// full-panorama atlas seeded with the base image and visible tiles stream in.
 import { MercatorCoordinate } from 'maplibre-gl';
+import { visibleTiles } from './tiles.js';
+
+export { visibleTiles };
 
 const VERTEX_SHADER_SOURCE = `
     attribute vec2 aPosition;
@@ -18,6 +23,10 @@ const VERTEX_SHADER_SOURCE = `
         gl_Position = vec4(aPosition, 0.0, 1.0);
     }
 `;
+
+const TILE_CONCURRENCY = 4; // parallel tile downloads while refining
+const TILE_REFRESH_MS = 150; // debounce between look/zoom and a tile refresh
+const ATLAS_MAX = 8192; // atlas width cap (px) — beyond this, tiles downscale
 
 const MAX_ARROWS = 6;
 const ARROW_GROUND_DIST = 5; // where a ground arrow sits, from the eye (m)
@@ -219,6 +228,14 @@ export class Photosphere {
         this._walkDir = [0, 0]; // unit (east, north) travel direction during a walk (#64)
         this._gl = null;
         this._layerCtx = null;
+        // Progressive HD tiles: {width, cols, rows, url(col, row)} per panorama.
+        // The current texture becomes a full-panorama atlas seeded with the base
+        // image; visible tiles then texSubImage2D into it (v0.3.0).
+        this._tiles = this._options.tiles || null;
+        this._tilesNext = null; // the walk target's tiles config, adopted on arrival
+        this._tileState = null; // {tiles, scale, loaded, inflight, queue} for the current atlas
+        this._tileEpoch = 0; // bumps on every pano/atlas change; stale loads check it
+        this._tileTimer = null;
 
         this._layer = this._createLayer();
         // MapLibre 6's internal `map.style` is not a truthy public property, so
@@ -335,6 +352,7 @@ export class Photosphere {
         this._yawDeg = (this._yawDeg + deltaYawDeg + 360) % 360;
         this._pitchDeg = Math.max(minPitch, Math.min(maxPitch, this._pitchDeg + deltaPitchDeg));
         this._updateCameraWhileInside();
+        this._scheduleTileRefresh();
         this._map.triggerRepaint();
     }
 
@@ -345,6 +363,7 @@ export class Photosphere {
         if (this._mode === 'inside') {
             this._recalibrateLookTargetDistance();
             this._updateCameraWhileInside();
+            this._scheduleTileRefresh();
         }
         this._map.triggerRepaint();
     }
@@ -370,6 +389,9 @@ export class Photosphere {
             if (target.lngLat) this._options.lngLat = target.lngLat;
             if (target.imageUrl) {
                 this._options.imageUrl = target.imageUrl;
+                this._tiles = target.tiles || null;
+                this._tileState = null;
+                this._tileEpoch++;
                 this._loadTexture(target.imageUrl);
             }
         }
@@ -397,6 +419,7 @@ export class Photosphere {
         this._animate({ center: lngLat, zoom, pitch: 90, bearing: this._yawDeg }, eyeHeight, 1, () => {
             this._mode = 'inside';
             this._updateCameraWhileInside();
+            this._scheduleTileRefresh();
             if (onEnter) onEnter();
         });
     }
@@ -414,6 +437,7 @@ export class Photosphere {
         // Orient the next sphere by its own heading during the crossfade (#52).
         this._panoYawDeg2 = typeof target.panoYaw === 'number' ? target.panoYaw
             : typeof target.bearing === 'number' ? target.bearing : this._panoYawDeg;
+        this._tilesNext = target.tiles || null;
         this._loadInto('texture2', target.imageUrl, (err) => {
             if (this._mode !== 'inside') return;
             if (err) { // fall back to an instant swap rather than getting stuck
@@ -467,6 +491,9 @@ export class Photosphere {
             const tmp = layer.texture;
             layer.texture = layer.texture2;
             layer.texture2 = tmp;
+            const tmpImage = layer.textureImage;
+            layer.textureImage = layer.texture2Image;
+            layer.texture2Image = tmpImage;
             layer.textureReady = true;
         }
         this._options.lngLat = toAnchor;
@@ -477,6 +504,14 @@ export class Photosphere {
         this._endTransitionState();
         this._recalibrateLookTargetDistance();
         this._updateCameraWhileInside();
+        // Adopt the new pano's tiles and start refining from its base (v0.3.0).
+        this._tiles = this._tilesNext;
+        this._tilesNext = null;
+        this._tileState = null;
+        this._tileEpoch++;
+        if (this._tiles && layer && layer.textureImage) {
+            this._buildAtlas(layer.textureImage, this._tiles);
+        }
         this._map.triggerRepaint();
         if (this._options.onMove) this._options.onMove(target);
     }
@@ -512,6 +547,12 @@ export class Photosphere {
     }
 
     remove() {
+        if (this._tileTimer) {
+            clearTimeout(this._tileTimer);
+            this._tileTimer = null;
+        }
+        this._tileState = null;
+        this._tileEpoch++;
         const map = this._map;
         const container = map.getContainer();
         container.removeEventListener('mousedown', this._onMouseDown);
@@ -543,7 +584,14 @@ export class Photosphere {
         image.onload = () => {
             gl.bindTexture(gl.TEXTURE_2D, layer[slot]);
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
-            if (slot === 'texture') layer.textureReady = true;
+            layer[slot + 'Image'] = image; // kept to seed a tile atlas later
+            if (slot === 'texture') {
+                layer.textureReady = true;
+                // The base is up (usable as-is); refine it with HD tiles if the
+                // current panorama has a tiles config (v0.3.0).
+                this._tileState = null;
+                if (this._tiles) this._buildAtlas(image, this._tiles);
+            }
             this._map.triggerRepaint();
             if (onReady) onReady();
         };
@@ -553,6 +601,139 @@ export class Photosphere {
 
     _loadTexture(url, onReady) {
         this._loadInto('texture', url, onReady);
+    }
+
+    // ---- Progressive HD tiles (v0.3.0) --------------------------------------
+    // The current texture is re-allocated as a full-panorama atlas (capped by
+    // MAX_TEXTURE_SIZE / ATLAS_MAX), seeded with the base image scaled up, then
+    // visible tiles stream into it with texSubImage2D. The fragment shader is
+    // untouched — it keeps sampling one equirectangular texture.
+
+    // Re-uploads the base image at atlas size and resets the tile state.
+    _buildAtlas(image, tiles) {
+        const gl = this._gl;
+        const layer = this._layerCtx;
+        if (!gl || !layer || !image || !tiles || !tiles.width || !tiles.cols || !tiles.rows) return;
+        const maxTexture = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 4096;
+        const atlasW = Math.min(tiles.width, maxTexture, ATLAS_MAX);
+        const atlasH = Math.round(atlasW / 2);
+        const epoch = ++this._tileEpoch;
+        this._scaled(image, atlasW, atlasH).then((source) => {
+            if (epoch !== this._tileEpoch || !this._gl) return;
+            gl.bindTexture(gl.TEXTURE_2D, layer.texture);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+            if (source.close) source.close();
+            this._tileState = {
+                tiles,
+                epoch,
+                scale: atlasW / tiles.width,
+                loaded: new Set(),
+                inflight: new Set(),
+                queue: []
+            };
+            this._map.triggerRepaint();
+            this._scheduleTileRefresh();
+        }).catch(() => { /* keep the plain base — refinement is best-effort */ });
+    }
+
+    // Image scaled to (w, h), as an ImageBitmap when the browser can, else a
+    // canvas. Off-main-thread decode + resize where available.
+    _scaled(image, w, h) {
+        if (image.width === w && image.height === h) return Promise.resolve(image);
+        if (typeof createImageBitmap === 'function') {
+            return createImageBitmap(image, { resizeWidth: w, resizeHeight: h, resizeQuality: 'high' })
+                .catch(() => this._scaledCanvas(image, w, h));
+        }
+        return Promise.resolve(this._scaledCanvas(image, w, h));
+    }
+
+    _scaledCanvas(image, w, h) {
+        const canvas = this._scratchCanvas || (this._scratchCanvas = document.createElement('canvas'));
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d').drawImage(image, 0, 0, w, h);
+        return canvas;
+    }
+
+    // Debounced entry point, called after every look / zoom / walk settle.
+    _scheduleTileRefresh() {
+        if (this._tileTimer || !this._tileState) return;
+        this._tileTimer = setTimeout(() => {
+            this._tileTimer = null;
+            this._refreshTiles();
+        }, TILE_REFRESH_MS);
+    }
+
+    // Recomputes the visible tiles for the current camera and reloads the queue
+    // (most-central first); already-loaded and in-flight tiles are skipped.
+    _refreshTiles() {
+        const state = this._tileState;
+        if (!state || this._mode !== 'inside' || this._transitioning) return;
+        const canvas = this._map.getCanvas();
+        const aspect = (canvas.clientWidth || canvas.width || 1) / (canvas.clientHeight || canvas.height || 1);
+        const wanted = visibleTiles({
+            yawDeg: this._yawDeg,
+            pitchDeg: this._pitchDeg,
+            panoYawDeg: this._panoYawDeg,
+            fovDeg: this._options.fov,
+            aspect,
+            cols: state.tiles.cols,
+            rows: state.tiles.rows
+        });
+        state.queue = wanted.filter(t => !state.loaded.has(`${t.col}x${t.row}`) && !state.inflight.has(`${t.col}x${t.row}`));
+        this._pumpTiles();
+    }
+
+    _pumpTiles() {
+        const state = this._tileState;
+        if (!state) return;
+        while (state.inflight.size < TILE_CONCURRENCY && state.queue.length) {
+            const tile = state.queue.shift();
+            const key = `${tile.col}x${tile.row}`;
+            if (state.loaded.has(key) || state.inflight.has(key)) continue;
+            state.inflight.add(key);
+            this._loadTile(state, tile, key);
+        }
+    }
+
+    _loadTile(state, tile, key) {
+        const done = () => {
+            if (this._tileState !== state) return; // pano changed mid-flight
+            state.inflight.delete(key);
+            state.loaded.add(key); // errors too: leave the base, don't retry-storm
+            this._pumpTiles();
+        };
+        const url = state.tiles.url(tile.col, tile.row);
+        if (!url) { done(); return; }
+        const image = new Image();
+        image.crossOrigin = 'anonymous';
+        image.onload = () => {
+            if (this._tileState !== state || !this._gl) return;
+            const rect = this._tileRect(state, tile);
+            this._scaled(image, rect.w, rect.h).then((source) => {
+                if (this._tileState === state && this._gl) {
+                    const gl = this._gl;
+                    gl.bindTexture(gl.TEXTURE_2D, this._layerCtx.texture);
+                    gl.texSubImage2D(gl.TEXTURE_2D, 0, rect.x, rect.y, gl.RGBA, gl.UNSIGNED_BYTE, source);
+                    if (source.close) source.close();
+                    this._map.triggerRepaint();
+                }
+                done();
+            }).catch(done);
+        };
+        image.onerror = done;
+        image.src = url;
+    }
+
+    // Atlas rectangle of a tile, rounded edge-by-edge so adjacent tiles always
+    // abut exactly (no cracks) at any atlas scale.
+    _tileRect(state, tile) {
+        const { tiles, scale } = state;
+        const x0 = Math.round(tile.col * tiles.width / tiles.cols * scale);
+        const x1 = Math.round((tile.col + 1) * tiles.width / tiles.cols * scale);
+        const y0 = Math.round(tile.row * (tiles.width / 2) / tiles.rows * scale);
+        const y1 = Math.round((tile.row + 1) * (tiles.width / 2) / tiles.rows * scale);
+        return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
     }
 
     _createLayer() {
@@ -776,6 +957,7 @@ export class Photosphere {
         this._lastX = event.clientX;
         this._lastY = event.clientY;
         this._updateCameraWhileInside();
+        this._scheduleTileRefresh();
         this._map.triggerRepaint();
     }
 
@@ -808,6 +990,7 @@ export class Photosphere {
             this._lastX = t.clientX;
             this._lastY = t.clientY;
             this._updateCameraWhileInside();
+            this._scheduleTileRefresh();
             this._map.triggerRepaint();
         } else if (event.touches.length === 2 && this._pinchDist) {
             const d = this._touchDistance(event);

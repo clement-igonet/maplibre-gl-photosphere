@@ -96,6 +96,27 @@ describe('Photosphere', () => {
         vi.useRealTimers();
     });
 
+    test('carries a tiles config through enter() and goTo() without a GL context', () => {
+        vi.useFakeTimers();
+        const map = fakeMap();
+        const tiles = {width: 5640, cols: 8, rows: 4, url: () => null};
+        const photosphere = new Photosphere(map, {lngLat: [2, 48], imageUrl: 'x.jpg', durationMs: 10, tiles});
+        photosphere.enter({lngLat: [2, 48], imageUrl: 'y.jpg', bearing: 90, tiles});
+        vi.advanceTimersByTime(1000);
+        expect(photosphere.mode).toBe('inside');
+        expect(photosphere._tiles).toBe(tiles);
+
+        // Look + zoom schedule tile refreshes but must stay inert with no GL.
+        photosphere.look(10, 5);
+        photosphere.zoomFov(-10);
+        vi.advanceTimersByTime(1000);
+
+        photosphere.goTo({lngLat: [2.001, 48], imageUrl: 'z.jpg', tiles: null});
+        vi.advanceTimersByTime(1000);
+        expect(photosphere.mode).toBe('inside');
+        vi.useRealTimers();
+    });
+
     test('remove() detaches the layer', () => {
         const map = fakeMap();
         const photosphere = new Photosphere(map, {lngLat: [2, 48], imageUrl: 'x.jpg'});

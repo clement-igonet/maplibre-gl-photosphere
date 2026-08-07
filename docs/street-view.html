@@ -74,12 +74,27 @@
     const response = await fetch(`${API}/collections/${COLLECTION}/items?limit=100`);
     const collection = await response.json();
     // Keep only equirectangular 360° pictures; they come back in capture order.
+    // Each picture's tiled HD derivate (STAC tiled-assets: a col/row grid plus
+    // a {TileCol}/{TileRow} URL template) feeds the plugin's progressive
+    // refinement: the SD base shows immediately, HD tiles stream in on look.
+    function tilesConfig(f) {
+        const matrix = f.properties['tiles:tile_matrix_sets']?.geovisio?.tileMatrix?.[0];
+        const template = (f.asset_templates?.tiles_webp || f.asset_templates?.tiles)?.href;
+        if (!matrix || !template) return null;
+        return {
+            width: Math.round(matrix.matrixWidth * matrix.tileWidth),
+            cols: matrix.matrixWidth,
+            rows: matrix.matrixHeight,
+            url: (col, row) => template.replace(/\{TileCol\}/g, col).replace(/\{TileRow\}/g, row)
+        };
+    }
     const sequence = collection.features
         .filter((f) => f.properties.exif?.['Xmp.GPano.ProjectionType'] === 'equirectangular')
         .map((f) => ({
             lngLat: f.geometry.coordinates,
             imageUrl: f.assets.sd?.href || f.assets.hd.href,
-            bearing: f.properties['view:azimuth'] ?? 0
+            bearing: f.properties['view:azimuth'] ?? 0,
+            tiles: tilesConfig(f)
         }));
 
     const map = new maplibregl.Map({
@@ -111,8 +126,9 @@
     const photosphere = new Photosphere(map, {
         lngLat: sequence[0].lngLat,
         imageUrl: sequence[0].imageUrl,
+        tiles: sequence[0].tiles,
         exitView: {center: sequence[0].lngLat, zoom: 17, pitch: 55, bearing: 0},
-        onEnter: () => { hint.textContent = 'Drag to look around. Use Forward / Back to walk the street.'; nav.style.display = 'flex'; setRouteVisible('none'); },
+        onEnter: () => { hint.textContent = 'Drag to look around — HD tiles sharpen where you look. Use Forward / Back to walk the street.'; nav.style.display = 'flex'; setRouteVisible('none'); },
         onExit: () => { hint.textContent = 'Click a point on the route to step into the street.'; nav.style.display = 'none'; setRouteVisible('visible'); }
     });
 

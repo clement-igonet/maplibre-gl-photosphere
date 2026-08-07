@@ -27,6 +27,7 @@ photosphere.remove();
 |---|---|---|
 | `lngLat` | required | anchor point of the panorama |
 | `imageUrl` | required | spherical (equirectangular) panorama image |
+| `tiles` | | tiled HD derivate for progressive refinement — see below |
 | `eyeHeight` | `1.6` | metres above ground while inside |
 | `zoom` | `18` | map zoom while inside |
 | `radius` | `6` | sphere radius in metres (parallax while entering) |
@@ -36,6 +37,30 @@ photosphere.remove();
 | `fov` | `75` | vertical field of view in degrees |
 | `exitView` | last outside view | `{center, zoom, pitch, bearing}` to return to |
 | `onEnter` / `onExit` | | callbacks |
+
+### Progressive HD tiles
+
+Panoramax-style tiled derivates refine the panorama in place: the base
+`imageUrl` shows immediately, then the tiles visible from the current camera
+stream in, most-central first, as you look around.
+
+```js
+photosphere.enter({
+    lngLat, imageUrl, bearing,
+    tiles: {
+        width: 5640,          // full panorama width in px (height = width / 2)
+        cols: 8, rows: 4,     // tile grid
+        url: (col, row) => `…/tiled/${col}_${row}.jpg`
+    }
+});
+```
+
+The texture becomes a full-panorama atlas (capped by the GPU's
+`MAX_TEXTURE_SIZE`, tiles downscale beyond it) seeded with the base image, and
+tiles `texSubImage2D` into it — the shader still samples one equirectangular
+texture, so blending, transitions and ground overlays are unaffected. The
+visible-tile maths (seam wrap, pole rows, angle-based priority) is exported as
+`visibleTiles()` from `src/tiles.js`, pure and testable without WebGL.
 
 ## How it works
 
