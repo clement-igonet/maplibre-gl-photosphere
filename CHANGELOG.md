@@ -2,8 +2,45 @@
 
 ## main
 
+Capture-pose model and editor hooks — the viewer half of a street-view pose /
+position editor (proven in production in [MapMax](https://github.com/clement-igonet/mapmax),
+issues #98/#106/#107 there). All features are additive; the 0.3.0 API is intact.
+
 ### ✨ Features and improvements
-- _...Add new stuff here..._
+- **Full capture pose** (yaw / pitch / roll): the shader's yaw-only
+  `uPanoYaw` floats become `uPanoRot`/`uPanoRot2` mat3 uniforms built by the
+  new `panoPoseMatrix()`, so a tilted capture can be levelled live, not just
+  rotated. `enter()`/`goTo()` targets take optional `panoPitch`/`panoRoll`
+  (degrees) next to the existing `panoYaw`; the pose is promoted across walk
+  transitions like the yaw always was.
+- **`setPanoPose({yaw, pitch, roll})` / `getPanoPose()`**: live pose
+  correction of the current panorama; changed components only. Re-schedules
+  the HD-tile refresh, since a pose change moves the visible texture regions.
+- **Pose rendering maths** (`src/pose.js`, re-exported from the index): pure
+  and unit-tested — `panoPoseMatrix` (world→capture-frame mat3, gimbal-safe
+  at ±90°), `poseTransform`, `normalizeYaw`. The *editing* algebra
+  (`composePoseGesture`, `poseFromMatrix`, …) deliberately lives in
+  [maplibre-gl-panoramax](https://github.com/clement-igonet/maplibre-gl-panoramax)
+  next to the data source that stores corrections: viewers only render.
+- **`setPoseEditDrag(cb)`**: while a callback is set, canvas drags feed it
+  `(dxDeg, dyDeg, {x, y, prevX, prevY, shiftKey})` instead of moving the
+  camera — the hook an editor UI builds on (compose the gesture with
+  maplibre-gl-panoramax, then `setPanoPose`). `null` restores look-around.
+- **`groundPointAt(px, py)`**: the floor raycast behind `groundPick`, now
+  public — returns (east, north) metres from the eye, or `null` above the
+  horizon; enables ground-grab position editing.
+- **`setAnchor(lngLat, eyeHeight)`**: re-anchor the current panorama in place
+  (position/altitude correction), camera and ground overlays follow.
+- **Pose-aware `visibleTiles()`**: accepts a `panoRot` matrix (supersedes
+  `panoYawDeg`) so HD tiles follow a pitched/rolled pose exactly like the
+  shader; the pole-row special case tracks the pose's up axis instead of the
+  world pole.
+
+### Consumer note
+Overlay UIs drawn above the WebGL canvas: prefer several small opaque
+elements over one large surface, and avoid permanent layer promotion
+(`will-change`) — large promoted overlays render unreliably on some
+GPU/driver combinations (field report from MapMax).
 
 ### 🐞 Bug fixes
 - _...Add new stuff here..._

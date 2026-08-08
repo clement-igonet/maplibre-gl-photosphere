@@ -9,6 +9,8 @@
 // instead of iterating sphere-mesh vertices, so seam wrap and pole coverage
 // fall out of the projection maths.
 
+import { poseTransform } from './pose.js';
+
 const TAU = Math.PI * 2;
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -25,6 +27,9 @@ const normalize = (v) => {
  * @param {number} view.yawDeg camera yaw (deg, world azimuth)
  * @param {number} view.pitchDeg camera pitch (deg, positive up)
  * @param {number} [view.panoYawDeg] world azimuth the image centre faces (deg)
+ * @param {number[]} [view.panoRot] full capture pose (column-major mat3 from
+ *   panoPoseMatrix) — supersedes panoYawDeg when given, so tiles follow a
+ *   pitched/rolled pose exactly like the shader does
  * @param {number} view.fovDeg vertical field of view (deg)
  * @param {number} view.aspect viewport width / height
  * @param {number} view.cols number of tile columns in the full panorama
@@ -34,7 +39,7 @@ const normalize = (v) => {
  * @returns {{col: number, row: number, priority: number}[]} sorted ascending by
  *   priority (angle to the view direction, ×2 on the pole rows)
  */
-export function visibleTiles({yawDeg, pitchDeg, panoYawDeg = 0, fovDeg, aspect, cols, rows, samples = 13, marginNdc = 0.15}) {
+export function visibleTiles({yawDeg, pitchDeg, panoYawDeg = 0, panoRot = null, fovDeg, aspect, cols, rows, samples = 13, marginNdc = 0.15}) {
     const yaw = yawDeg * Math.PI / 180;
     const pitch = pitchDeg * Math.PI / 180;
     const panoYaw = panoYawDeg * Math.PI / 180;
@@ -66,8 +71,11 @@ export function visibleTiles({yawDeg, pitchDeg, panoYawDeg = 0, fovDeg, aspect, 
                 forward[1] + right[1] * nx * tanX + up[1] * ny * tanY,
                 forward[2] + right[2] * nx * tanX + up[2] * ny * tanY,
             ]);
-            const phi = Math.asin(clamp(dir[2], -1, 1));
-            const theta = Math.atan2(dir[0], dir[1]) - panoYaw;
+            // Same direction→UV mapping as the fragment shader: full pose
+            // matrix when provided, yaw-only subtraction otherwise.
+            const nc = panoRot ? poseTransform(panoRot, dir) : dir;
+            const phi = Math.asin(clamp(nc[2], -1, 1));
+            const theta = panoRot ? Math.atan2(nc[0], nc[1]) : Math.atan2(nc[0], nc[1]) - panoYaw;
             const u = (((0.5 + theta / TAU) % 1) + 1) % 1;
             const v = clamp(0.5 - phi / Math.PI, 0, 1);
             const col = Math.min(cols - 1, Math.floor(u * cols));
@@ -79,11 +87,15 @@ export function visibleTiles({yawDeg, pitchDeg, panoYawDeg = 0, fovDeg, aspect, 
 
     // A visible pole spans every column of its row — near it u varies too fast
     // for grid sampling to be exhaustive, so test the pole point against the
-    // frustum directly and add the full row when it shows.
+    // frustum directly and add the full row when it shows. With a full pose the
+    // TEXTURE pole sits on the pose's up axis (third column of the matrix), not
+    // the world pole.
+    const poleAxis = panoRot ? [panoRot[6], panoRot[7], panoRot[8]] : [0, 0, 1];
     for (const sign of [1, -1]) {
-        const pz = sign * forward[2]; // dot(pole, forward); pole = (0, 0, ±1)
-        const px = sign * right[2];
-        const py = sign * up[2];
+        const pole = [sign * poleAxis[0], sign * poleAxis[1], sign * poleAxis[2]];
+        const pz = pole[0] * forward[0] + pole[1] * forward[1] + pole[2] * forward[2];
+        const px = pole[0] * right[0] + pole[1] * right[1] + pole[2] * right[2];
+        const py = pole[0] * up[0] + pole[1] * up[1] + pole[2] * up[2];
         if (pz > 1e-9 && Math.abs(px / pz) <= tanX * lim && Math.abs(py / pz) <= tanY * lim) {
             const row = sign > 0 ? 0 : rows - 1;
             const angle = Math.acos(clamp(pz, -1, 1));
