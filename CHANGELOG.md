@@ -30,7 +30,10 @@ Progressive HD tiles. All features are additive; the 0.2.0 API is intact.
   (podman compose), see RULES.md.
 - The GitHub Pages street-view demo now builds the `tiles` config from the
   Panoramax STAC tiled-assets fields (`tiles:tile_matrix_sets` +
-  `asset_templates`), so HD sharpens in place as you look around.
+  `asset_templates`), so HD sharpens in place as you look around; it also
+  shows the in-sphere ground navigation (blue dots at the adjacent panoramas'
+  real positions + walk arrows, click-to-walk via `groundPick`, pointer cursor
+  on hover) instead of relying on the HTML buttons alone.
 
 ## 0.2.0 — 2026-07-29
 

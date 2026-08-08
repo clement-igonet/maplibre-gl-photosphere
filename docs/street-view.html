@@ -128,8 +128,53 @@
         imageUrl: sequence[0].imageUrl,
         tiles: sequence[0].tiles,
         exitView: {center: sequence[0].lngLat, zoom: 17, pitch: 55, bearing: 0},
-        onEnter: () => { hint.textContent = 'Drag to look around — HD tiles sharpen where you look. Use Forward / Back to walk the street.'; nav.style.display = 'flex'; setRouteVisible('none'); },
-        onExit: () => { hint.textContent = 'Click a point on the route to step into the street.'; nav.style.display = 'none'; setRouteVisible('visible'); }
+        onEnter: () => { hint.textContent = 'Drag to look around — HD tiles sharpen where you look. Click a ground arrow / blue dot (or Forward / Back) to walk.'; nav.style.display = 'flex'; setRouteVisible('none'); refreshGroundNav(); },
+        onExit: () => { hint.textContent = 'Click a point on the route to step into the street.'; nav.style.display = 'none'; setRouteVisible('visible'); photosphere.setNavPois([]); photosphere.setNavArrows([]); }
+    });
+
+    // Ground navigation inside the photosphere: a blue dot on the street at
+    // each adjacent panorama's real position, plus a walk arrow toward it.
+    // Positions are metres (east, north) from the current eye.
+    function offsetMeters(from, to) {
+        const mPerDegLat = 111320;
+        const mPerDegLng = mPerDegLat * Math.cos(from[1] * Math.PI / 180);
+        return {east: (to[0] - from[0]) * mPerDegLng, north: (to[1] - from[1]) * mPerDegLat};
+    }
+
+    function refreshGroundNav() {
+        const here = sequence[index].lngLat;
+        const pois = [];
+        const arrows = [];
+        for (const [id, i] of [['prev', index - 1], ['next', index + 1]]) {
+            if (i < 0 || i >= sequence.length) continue;
+            const {east, north} = offsetMeters(here, sequence[i].lngLat);
+            pois.push({east, north, id});
+            arrows.push({bearing: Math.atan2(east, north) * 180 / Math.PI, id});
+        }
+        photosphere.setNavPois(pois);
+        photosphere.setNavArrows(arrows);
+    }
+
+    // Click (not drag) on an arrow or dot walks there; hovering one shows a
+    // pointer cursor. groundPick ray-casts the floor with the shader's maths.
+    let pressAt = null;
+    const canvasPoint = (event) => {
+        const rect = map.getCanvas().getBoundingClientRect();
+        return [event.clientX - rect.left, event.clientY - rect.top];
+    };
+    map.getContainer().addEventListener('mousedown', (event) => { pressAt = [event.clientX, event.clientY]; });
+    map.getContainer().addEventListener('mouseup', (event) => {
+        const from = pressAt;
+        pressAt = null;
+        if (!from || photosphere.mode !== 'inside') return;
+        if (Math.hypot(event.clientX - from[0], event.clientY - from[1]) > 5) return;
+        const picked = photosphere.groundPick(...canvasPoint(event));
+        if (picked === 'next') move(1);
+        else if (picked === 'prev') move(-1);
+    });
+    map.getContainer().addEventListener('mousemove', (event) => {
+        if (photosphere.mode !== 'inside' || pressAt) return;
+        map.getCanvas().style.cursor = photosphere.groundPick(...canvasPoint(event)) ? 'pointer' : '';
     });
 
     const prevButton = document.getElementById('prev');
@@ -144,6 +189,10 @@
         const target = index + delta;
         if (target < 0 || target >= sequence.length) return;
         index = target;
+        // Old dots are relative to the old eye — hide them during the walk;
+        // onMove restores them at the new position on arrival.
+        photosphere.setNavPois([]);
+        photosphere.setNavArrows([]);
         photosphere.goTo(sequence[index]);
         map.getSource('sequence-here')?.setData(pointFeature(index));
         refreshNav();
@@ -183,8 +232,11 @@
         map.on('mouseleave', 'points', () => { map.getCanvas().style.cursor = ''; });
     });
 
-    // Keep the "here" dot in sync as goTo moves along the sequence.
-    photosphere._options.onMove = () => map.getSource('sequence-here')?.setData(pointFeature(index));
+    // Keep the "here" dot and the in-sphere ground nav in sync on arrival.
+    photosphere._options.onMove = () => {
+        map.getSource('sequence-here')?.setData(pointFeature(index));
+        refreshGroundNav();
+    };
 
     prevButton.addEventListener('click', () => move(-1));
     nextButton.addEventListener('click', () => move(1));
