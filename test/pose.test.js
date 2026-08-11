@@ -1,8 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {panoPoseMatrix, poseTransform} from '../src/pose.js';
-
-// Rendering-side pose maths only: the editing algebra (composePoseGesture,
-// poseFromMatrix, …) lives in maplibre-gl-panoramax with its own suite.
+import {normalizeYaw, panoPoseMatrix, poseTransform} from '../src/pose.js';
 
 const close = (a, b, eps = 1e-9) => expect(Math.abs(a - b)).toBeLessThan(eps);
 

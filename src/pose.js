@@ -1,10 +1,11 @@
-// Capture-pose maths for RENDERING the photosphere: yaw / pitch / roll of the
-// camera that shot the panorama, as the world→capture-frame rotation the
-// fragment shader and the visible-tile computation share. Pure — no WebGL.
+// Capture-pose maths for the photosphere: yaw / pitch / roll of the camera
+// that shot the panorama. Pure — shared by the fragment shader (via
+// uniformMatrix3fv), the visible-tile computation and the tests.
 //
-// The EDITING algebra (composePoseGesture, poseFromMatrix, …) deliberately
-// lives in maplibre-gl-panoramax, next to the data source that stores pose
-// corrections: viewers only render. This module mirrors its conventions.
+// This is RENDERING maths only: applying a known pose so corrected data
+// displays right, whatever imagery source produced it. Editor semantics
+// (gesture algebra, write-back) deliberately live outside this plugin — see
+// maplibre-gl-panoramax for the Panoramax editing stack.
 //
 // Conventions (matching the shader): world x = east, y = north, z = up;
 // azimuth measured from +y (north) toward +x (east).

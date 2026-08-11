@@ -312,10 +312,11 @@ export class Photosphere {
         return { yaw: this._panoYawDeg, pitch: this._panoPitchDeg, roll: this._panoRollDeg };
     }
 
-    // Pose-edit mode: while a callback is set, drags feed it
-    // (dxDeg, dyDeg, {x, y, prevX, prevY, shiftKey}) instead of moving the
-    // camera — the editor composes them onto the pose (see composePoseGesture).
-    // null restores normal look-around.
+    // Neutral input-routing hook: while a callback is set, canvas drags feed
+    // it (dxDeg, dyDeg, {x, y, prevX, prevY, shiftKey}) instead of moving the
+    // camera. The plugin itself ships NO editing — this is the attachment
+    // point for external tools (pose editors like maplibre-gl-panoramax's,
+    // measurement, annotation…). null restores normal look-around.
     setPoseEditDrag(cb) {
         this._poseEditDrag = typeof cb === 'function' ? cb : null;
     }

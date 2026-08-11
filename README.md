@@ -141,18 +141,17 @@ photosphere.zoomFov(-5);            // FOV zoom (wheel / pinch built in too)
 | `look(dYaw, dPitch)` / `zoomFov(dDeg)` | programmatic look / FOV zoom |
 | `setNavArrows(list)` / `setNavPois(list)` | ground arrows / neighbour dots |
 | `groundPick(px, py)` | id of the arrow/dot under a screen pixel, or `null` |
-| `setPanoPose({yaw, pitch, roll})` / `getPanoPose()` | live capture-pose correction (0.4.0) |
-| `setPoseEditDrag(cb)` | route drags to a pose editor instead of the camera (0.4.0) |
+| `setPanoPose({yaw, pitch, roll})` / `getPanoPose()` | live capture-pose rendering (0.4.0) |
+| `setPoseEditDrag(cb)` | neutral hook: route canvas drags to external tools (0.4.0) |
 | `groundPointAt(px, py)` | floor raycast → (east, north) metres, or `null` (0.4.0) |
 | `setAnchor(lngLat, eyeHeight?)` | re-anchor the current panorama in place (0.4.0) |
 | `mode` / `yaw` / `pitch` / `lngLat` | current state (getters) |
 | `remove()` | detach the layer and listeners |
 
-Rendering pose maths (`panoPoseMatrix`, `poseTransform`) are exported — see
-`src/pose.js`. The *editing* algebra (`composePoseGesture`, `poseFromMatrix`)
-lives in [maplibre-gl-panoramax](https://github.com/clement-igonet/maplibre-gl-panoramax),
-next to the write-back API: compose a gesture there, then `setPanoPose` here.
-Targets for `enter()`/`goTo()` accept `panoPitch`/`panoRoll` next to `panoYaw`.
+Targets for `enter()`/`goTo()` accept `panoPitch`/`panoRoll` (degrees) next to
+`panoYaw` — the plugin *renders* corrected poses from any imagery source, but
+deliberately ships **no editor**: gesture algebra and write-back live in
+[maplibre-gl-panoramax](https://github.com/clement-igonet/maplibre-gl-panoramax).
 
 ### Options
 
