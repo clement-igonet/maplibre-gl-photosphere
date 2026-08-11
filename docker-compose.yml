@@ -2,7 +2,7 @@
 # (see RULES.md: run on the `ssh maplibre` VM, podman compose / docker compose).
 #
 #   podman compose run --rm test      # vitest suite in a Node container
-#   podman compose up -d web          # demo preview on 127.0.0.1:8090 —
+#   podman compose up -d web          # demo preview on 127.0.0.1:9967 —
 #                                     # serves the repo root like GitHub Pages
 services:
   test:
@@ -16,7 +16,7 @@ services:
   web:
     image: docker.io/library/caddy:2-alpine
     ports:
-      - "127.0.0.1:${WEB_PORT:-8090}:80"
+      - "127.0.0.1:${WEB_PORT:-9967}:80"
     volumes:
       - .:/srv:ro
     command: caddy file-server --root /srv --listen :80

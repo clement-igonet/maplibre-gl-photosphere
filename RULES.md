@@ -11,6 +11,11 @@
 - **Rely on `docker-compose.yml` as the reference setup.** Every runnable
   concern (tests, demo preview) is a compose service; add new concerns as new
   services rather than ad-hoc commands.
+- **Ports: stay inside the maplibre band (99xx).** The VM's platform layer
+  (`debian:~/projects/platform/caddy/Caddyfile`) reserves a 127.0.0.1 port
+  band per product; maplibre owns 99xx (9966 = maplibre-gl-js dev server,
+  9967 = this repo's demo preview). Never bind 80xx/82xx/83xx/84xx ports —
+  they belong to other products behind the shared edge.
 
 The repo's home on the VM is
 `~/projects/maplibre-gl-js/maplibre-plugin-photosphere` (next to the
@@ -23,7 +28,7 @@ rsync -a --delete --exclude node_modules --exclude .git \
 ssh maplibre 'cd ~/projects/maplibre-gl-js/maplibre-plugin-photosphere && podman compose run --rm test'
 
 # preview the GitHub Pages demo (serves the repo root, as Pages does):
-ssh maplibre 'cd ~/projects/maplibre-gl-js/maplibre-plugin-photosphere && podman compose up -d web'
+ssh maplibre 'cd ~/projects/maplibre-gl-js/maplibre-plugin-photosphere && podman compose up -d web'   # 127.0.0.1:9967 (maplibre band 99xx)
 ```
 
 ## Deployment

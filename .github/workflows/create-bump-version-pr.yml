@@ -1,0 +1,26 @@
+name: Create bump version PR
+
+# Same flow as maplibre-gl-js: run this manually, pick the bump type, and it
+# opens a PR that bumps package.json and turns CHANGELOG.md's "## main"
+# section into the new version. Merging that PR to main triggers release.yml
+# (npm publish + tag + GitHub Release).
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        type: choice
+        description: 'Type of version bump'
+        options:
+          - major
+          - minor
+          - patch
+          - premajor
+          - preminor
+          - prepatch
+          - prerelease
+
+jobs:
+  bump-version-pr:
+    uses: maplibre/reusable-workflows/.github/workflows/create-bump-version-pr.yml@main
+    with:
+      version: ${{ github.event.inputs.release_type }}
