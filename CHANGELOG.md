@@ -1,6 +1,6 @@
 # Changelog
 
-## main
+## 0.4.0
 
 Capture-pose model and editor hooks — the viewer half of a street-view pose /
 position editor (proven in production in [MapMax](https://github.com/clement-igonet/mapmax),
