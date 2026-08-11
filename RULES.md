@@ -35,12 +35,24 @@ ssh maplibre 'cd ~/projects/maplibre-gl-js/maplibre-plugin-photosphere && podman
 
 - **GitHub Pages** serves the demo from the `main` branch root
   (`index.html` → `docs/`): every push to `main` deploys it.
-- **npm** publishes via trusted publishing when a `v*` tag is pushed
-  (`.github/workflows/release.yml`); the workflow runs the vitest suite first.
-  Pushing a tag IS the release action — do it deliberately.
+- **Releases are driven the maplibre-gl-js way**, through
+  [maplibre/reusable-workflows](https://github.com/maplibre/reusable-workflows):
+  1. Land changes on `main` with notes under the `## main` section of
+     CHANGELOG.md.
+  2. Run the **"Create bump version PR"** workflow (choose major/minor/patch);
+     it bumps package.json and renames `## main` → `## X.Y.Z` in a PR.
+  3. Merge the PR: `release.yml` detects the version change and does the rest —
+     vitest gate, **npm publish** (trusted publishing/OIDC, no tokens), the
+     `vX.Y.Z` **tag**, provenance attestation, and the **GitHub Release** whose
+     notes are the `## X.Y.Z` changelog section.
+- **Never push tags manually** — the workflow creates them. Keep changelog
+  version headers exactly `## X.Y.Z` (release-notes extraction matches them).
 
 ## Conventions
 
+- **After every finished action, suggest the next GitHub issue/PR to work
+  on** — pick from the open issues/PRs across maplibre-gl-photosphere,
+  maplibre-gl-panoramax and mapmax, and say why it is next.
 - Features are additive; keep the existing API intact (see CHANGELOG.md).
 - `src/` ships as-is (no build step): plain ES modules, no TypeScript syntax.
 - Pure logic that tests need (e.g. `src/tiles.js`) lives in its own module,

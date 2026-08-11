@@ -1,5 +1,13 @@
 # Changelog
 
+## main
+
+### ✨ Features and improvements
+- _...Add new stuff here..._
+
+### 🐞 Bug fixes
+- _...Add new stuff here..._
+
 ## 0.3.0 — 2026-08-07
 
 Progressive HD tiles. All features are additive; the 0.2.0 API is intact.

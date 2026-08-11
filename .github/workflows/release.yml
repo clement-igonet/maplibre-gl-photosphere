@@ -1,29 +1,29 @@
 name: Release
 
-# Publishes to npm via trusted publishing (OIDC): no tokens, no 2FA prompts.
-# Triggered by pushing a v* tag, or manually for an existing version.
+# Releases are driven the maplibre-gl-js way, through MapLibre's reusable
+# workflows: bump the version in package.json on main (see
+# create-bump-version-pr.yml) and this workflow detects the change, runs the
+# tests, publishes to npm (trusted publishing / OIDC — no tokens), creates the
+# vX.Y.Z tag, attests provenance and creates the GitHub Release from the
+# matching "## X.Y.Z" section of CHANGELOG.md. Never push tags manually.
+permissions:
+  id-token: write # Required for trusted publishing
+  contents: write
+  attestations: write
+
 on:
   push:
-    tags: ['v*']
-  workflow_dispatch: {}
-
-permissions:
-  id-token: write
-  contents: read
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: npm install --no-audit --no-fund
-      - run: npx vitest run
-      # Trusted publishing needs npm >= 11.5.1 for the OIDC token exchange.
-      - run: npm install -g npm@latest
-      - run: |
-          npm -v
-          if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then echo "OIDC env present"; else echo "OIDC env MISSING"; fi
-      - run: npm publish --loglevel http
+  release:
+    uses: maplibre/reusable-workflows/.github/workflows/npm-publish.yml@main
+    with:
+      # No build step (src/ ships as-is): the "build" is the test gate plus
+      # assembling dist/ for the release archive + provenance attestation.
+      build-command: npm ci --no-audit --no-fund && npx vitest run && rm -rf dist && mkdir dist && cp -r src README.md CHANGELOG.md LICENSE dist/
+      # The demo is static (docs/, served by GitHub Pages from main): nothing
+      # to build; the reusable workflow mirrors it to the gh-pages branch.
+      docs-command: 'true'
+      docs-output-dir: docs
