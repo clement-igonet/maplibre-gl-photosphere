@@ -1,0 +1,50 @@
+// Capture-pose maths for RENDERING the photosphere: yaw / pitch / roll of the
+// camera that shot the panorama, as the world→capture-frame rotation the
+// fragment shader and the visible-tile computation share. Pure — no WebGL.
+//
+// The EDITING algebra (composePoseGesture, poseFromMatrix, …) deliberately
+// lives in maplibre-gl-panoramax, next to the data source that stores pose
+// corrections: viewers only render. This module mirrors its conventions.
+//
+// Conventions (matching the shader): world x = east, y = north, z = up;
+// azimuth measured from +y (north) toward +x (east).
+//   yaw    0..360  world azimuth the image centre faces
+//   pitch −90..90  horizon = 0, top = +90 (camera tilted up at capture)
+//   roll  −90..90  flat = 0, right-arm down = +90
+
+// Normalize any yaw to [0, 360) (−180 → 180, 540 → 180).
+export const normalizeYaw = (deg) => ((deg % 360) + 360) % 360;
+
+// World → camera-frame rotation of the capture pose. Returns the COLUMN-MAJOR
+// 9-array for gl.uniformMatrix3fv of the matrix M with rows right/forward/up,
+// so `M * dir` yields camera-frame coords and
+//   theta = atan(nc.x, nc.y), phi = asin(nc.z)
+// generalizes the yaw-only `atan(d.x, d.y) − panoYaw`.
+export function panoPoseMatrix(yawDeg, pitchDeg = 0, rollDeg = 0) {
+    const d2r = Math.PI / 180;
+    const Y = (yawDeg || 0) * d2r, P = (pitchDeg || 0) * d2r, R = (rollDeg || 0) * d2r;
+    const sY = Math.sin(Y), cY = Math.cos(Y);
+    const sP = Math.sin(P), cP = Math.cos(P);
+    const sR = Math.sin(R), cR = Math.cos(R);
+
+    const f = [sY * cP, cY * cP, sP];
+    // Analytic right/up before roll (stays valid at |pitch| = 90 where
+    // cross(f, worldUp) degenerates).
+    const r0 = [cY, -sY, 0];
+    const u0 = [-sY * sP, -cY * sP, cP];
+    // Rodrigues about f: r' = r0·cosR − u0·sinR, u' = u0·cosR + r0·sinR.
+    const r = [r0[0] * cR - u0[0] * sR, r0[1] * cR - u0[1] * sR, r0[2] * cR - u0[2] * sR];
+    const u = [u0[0] * cR + r0[0] * sR, u0[1] * cR + r0[1] * sR, u0[2] * cR + r0[2] * sR];
+
+    // Column-major of M(rows r, f, u).
+    return [r[0], f[0], u[0], r[1], f[1], u[1], r[2], f[2], u[2]];
+}
+
+// Apply the matrix to a world direction (JS twin of the GLSL `M * dir`).
+export function poseTransform(m, v) {
+    return [
+        m[0] * v[0] + m[3] * v[1] + m[6] * v[2],
+        m[1] * v[0] + m[4] * v[1] + m[7] * v[2],
+        m[2] * v[0] + m[5] * v[1] + m[8] * v[2],
+    ];
+}

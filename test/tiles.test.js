@@ -86,3 +86,37 @@ describe('visibleTiles', () => {
         expect(new Set(keys).size).toBe(keys.length);
     });
 });
+
+describe('visibleTiles with a full capture pose (panoRot)', () => {
+    test('yaw-only matrix matches the panoYawDeg path exactly', async () => {
+        const {panoPoseMatrix} = await import('../src/pose.js');
+        const a = visibleTiles({...grid, yawDeg: 30, pitchDeg: 10, panoYawDeg: 208});
+        const b = visibleTiles({...grid, yawDeg: 30, pitchDeg: 10, panoRot: panoPoseMatrix(208, 0, 0)});
+        expect(b.map(key)).toEqual(a.map(key));
+    });
+
+    test('a pitched pose shifts which rows are fetched', async () => {
+        const {panoPoseMatrix} = await import('../src/pose.js');
+        // Camera level; the pano was captured pitched up 60°: the on-screen
+        // content lives in lower texture rows than the unpitched case.
+        const level = visibleTiles({...grid, yawDeg: 0, pitchDeg: 0, panoRot: panoPoseMatrix(0, 0, 0)});
+        const pitched = visibleTiles({...grid, yawDeg: 0, pitchDeg: 0, panoRot: panoPoseMatrix(0, 60, 0)});
+        const avgRow = (ts) => ts.reduce((s, t) => s + t.row, 0) / ts.length;
+        expect(avgRow(pitched)).toBeGreaterThan(avgRow(level));
+        for (const t of pitched) {
+            expect(t.col).toBeGreaterThanOrEqual(0);
+            expect(t.row).toBeGreaterThanOrEqual(0);
+            expect(t.row).toBeLessThan(grid.rows);
+        }
+    });
+
+    test('the texture pole follows the pose up-axis', async () => {
+        const {panoPoseMatrix} = await import('../src/pose.js');
+        // Pose pitched a full 90°: the texture's top pole lies on the horizon
+        // (the pose up-axis points at the camera) — looking straight at it must
+        // pull the full top row, exactly like looking up does for a level pose.
+        const tiles = visibleTiles({...grid, yawDeg: 180, pitchDeg: 0, panoRot: panoPoseMatrix(0, 90, 0)});
+        const topRowCols = new Set(tiles.filter((t) => t.row === 0).map((t) => t.col));
+        expect(topRowCols.size).toBe(grid.cols);
+    });
+});

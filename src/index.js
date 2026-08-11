@@ -12,6 +12,9 @@
 // full-panorama atlas seeded with the base image and visible tiles stream in.
 import { MercatorCoordinate } from 'maplibre-gl';
 import { visibleTiles } from './tiles.js';
+import { panoPoseMatrix } from './pose.js';
+
+export * from './pose.js';
 
 export { visibleTiles };
 
@@ -49,8 +52,8 @@ const FRAGMENT_SHADER_SOURCE = `
     uniform vec3 uSphereCenterOffset2;
     uniform sampler2D uPanorama2;
     uniform float uMix;            // 0 = current pano only, 1 = next pano only
-    uniform float uPanoYaw;        // world azimuth (rad) the current image centre faces (#52)
-    uniform float uPanoYaw2;       // ...and the next image's, during a walk
+    uniform mat3 uPanoRot;         // world→camera capture pose of the current image (yaw + pitch/roll)
+    uniform mat3 uPanoRot2;        // ...and the next image's, during a walk
     uniform vec2 uWalkDir;         // unit horizontal travel direction (east, north) during a walk (#64)
     uniform float uEyeHeight;      // eye height above the ground (m)
     uniform int uArrowCount;
@@ -59,10 +62,11 @@ const FRAGMENT_SHADER_SOURCE = `
     uniform vec2 uPois[${MAX_POIS}];     // neighbour-pano ground positions (east, north) m
 
     // Ray-cast one panorama sphere; returns rgb + hit-alpha (a = 0 on a miss).
-    // panoYaw (radians) is the world azimuth the image centre (u = 0.5) faces —
-    // Panoramax stores this as view:azimuth, so subtracting it aligns the photo
-    // to the map/vector world instead of assuming the centre points north (#52).
-    vec4 sampleSphere(vec3 viewDir, vec3 centerOffset, sampler2D tex, float panoYaw) {
+    // panoRot is the world→camera rotation of the capture pose (yaw from the
+    // image-centre azimuth, plus pitch/roll — built by panoPoseMatrix): applying
+    // it to the hit direction expresses it in the capture-camera frame, aligning
+    // the photo to the world and levelling a tilted capture.
+    vec4 sampleSphere(vec3 viewDir, vec3 centerOffset, sampler2D tex, mat3 panoRot) {
         vec3 originToCenter = -centerOffset;
         float b = dot(originToCenter, viewDir);
         float c = dot(originToCenter, originToCenter) - uSphereRadius * uSphereRadius;
@@ -74,8 +78,9 @@ const FRAGMENT_SHADER_SOURCE = `
         float t = tNear > 0.0 ? tNear : tFar;
         if (t < 0.0) return vec4(0.0);
         vec3 normal = normalize(viewDir * t - centerOffset);
-        float theta = atan(normal.x, normal.y) - panoYaw;
-        float phi = asin(clamp(normal.z, -1.0, 1.0));
+        vec3 nc = panoRot * normal;   // world dir → capture-camera frame
+        float theta = atan(nc.x, nc.y);
+        float phi = asin(clamp(nc.z, -1.0, 1.0));
         vec4 color = texture2D(tex, vec2(0.5 + theta / (2.0 * 3.14159265359), 0.5 - phi / 3.14159265359));
         return vec4(color.rgb, color.a);
     }
@@ -115,12 +120,12 @@ const FRAGMENT_SHADER_SOURCE = `
             vec3 wd = vec3(uWalkDir.x, uWalkDir.y, 0.0);
             vec3 d1 = normalize(viewDir + wd * (0.85 * uMix));         // zoom in, growing
             vec3 d2 = normalize(viewDir - wd * (0.30 * (1.0 - uMix))); // settle from wide
-            vec4 s1 = sampleSphere(d1, vec3(0.0), uPanorama, uPanoYaw);
-            vec4 s2 = sampleSphere(d2, vec3(0.0), uPanorama2, uPanoYaw2);
+            vec4 s1 = sampleSphere(d1, vec3(0.0), uPanorama, uPanoRot);
+            vec4 s2 = sampleSphere(d2, vec3(0.0), uPanorama2, uPanoRot2);
             rgb = mix(s1.rgb, s2.rgb, uMix);
             a = mix(s1.a, s2.a, uMix) * uAlpha;
         } else {
-            vec4 s1 = sampleSphere(viewDir, uSphereCenterOffset, uPanorama, uPanoYaw);
+            vec4 s1 = sampleSphere(viewDir, uSphereCenterOffset, uPanorama, uPanoRot);
             rgb = s1.rgb;
             a = s1.a * uAlpha;
         }
@@ -225,6 +230,10 @@ export class Photosphere {
         this._transitioning = false;
         this._panoYawDeg = 0; //  world azimuth the current image centre faces (#52)
         this._panoYawDeg2 = 0; // ...the next image's, during a walk
+        this._panoPitchDeg = 0; // capture pose correction: pitch/roll
+        this._panoRollDeg = 0;
+        this._panoPitchDeg2 = 0; // ...the next image's, during a walk
+        this._panoRollDeg2 = 0;
         this._walkDir = [0, 0]; // unit (east, north) travel direction during a walk (#64)
         this._gl = null;
         this._layerCtx = null;
@@ -287,23 +296,48 @@ export class Photosphere {
     get yaw() { return this._yawDeg; }
     get pitch() { return this._pitchDeg; }
 
-    // Ground navigation arrows rendered inside the panorama layer (mapmax #26).
-    // `list` = [{ bearing (deg toward the target), id }].
-    setNavArrows(list) {
-        this._navArrows = Array.isArray(list) ? list.slice(0, MAX_ARROWS) : [];
+    // Live capture-pose correction of the CURRENT panorama: yaw = world azimuth
+    // of the image centre, pitch/roll = capture tilt to undo. Only the
+    // components provided are changed. Re-schedules the HD-tile refresh — a
+    // pose change moves which texture regions are on screen.
+    setPanoPose({ yaw, pitch, roll } = {}) {
+        if (typeof yaw === 'number') this._panoYawDeg = yaw;
+        if (typeof pitch === 'number') this._panoPitchDeg = pitch;
+        if (typeof roll === 'number') this._panoRollDeg = roll;
+        this._scheduleTileRefresh();
         this._map.triggerRepaint();
     }
 
-    // Neighbour-panorama dots rendered on the floor (mapmax #39).
-    // `list` = [{ east, north (m from the eye), id }].
-    setNavPois(list) {
-        this._navPois = Array.isArray(list) ? list.slice(0, MAX_POIS) : [];
+    getPanoPose() {
+        return { yaw: this._panoYawDeg, pitch: this._panoPitchDeg, roll: this._panoRollDeg };
+    }
+
+    // Pose-edit mode: while a callback is set, drags feed it
+    // (dxDeg, dyDeg, {x, y, prevX, prevY, shiftKey}) instead of moving the
+    // camera — the editor composes them onto the pose (see composePoseGesture).
+    // null restores normal look-around.
+    setPoseEditDrag(cb) {
+        this._poseEditDrag = typeof cb === 'function' ? cb : null;
+    }
+
+    // Move the anchor (and optionally the eye height) of the CURRENT panorama
+    // in place — position-correction editing.
+    setAnchor(lngLat, eyeHeight) {
+        if (Array.isArray(lngLat)) this._options.lngLat = lngLat;
+        if (typeof eyeHeight === 'number' && Number.isFinite(eyeHeight)) {
+            this._options.eyeHeight = Math.max(0.2, eyeHeight);
+        }
+        if (this._mode === 'inside') {
+            this._recalibrateLookTargetDistance();
+            this._updateCameraWhileInside();
+        }
         this._map.triggerRepaint();
     }
 
-    // The id of the arrow or POI dot under screen pixel (px, py), or null. Ray-
-    // casts the floor with the same view maths as the shader (works at any pitch).
-    groundPick(px, py) {
+    // Ground point (east, north) metres from the eye under screen pixel
+    // (px, py), or null above the horizon — the floor raycast shared by
+    // groundPick and position-editing drags.
+    groundPointAt(px, py) {
         const canvas = this._map.getCanvas();
         const w = canvas.clientWidth;
         const h = canvas.clientHeight;
@@ -323,7 +357,28 @@ export class Photosphere {
         ]);
         if (vd[2] >= -1e-4) return null; // not looking at the floor
         const t = -this._options.eyeHeight / vd[2];
-        const g = [vd[0] * t, vd[1] * t];
+        return [vd[0] * t, vd[1] * t];
+    }
+
+    // Ground navigation arrows rendered inside the panorama layer (mapmax #26).
+    // `list` = [{ bearing (deg toward the target), id }].
+    setNavArrows(list) {
+        this._navArrows = Array.isArray(list) ? list.slice(0, MAX_ARROWS) : [];
+        this._map.triggerRepaint();
+    }
+
+    // Neighbour-panorama dots rendered on the floor (mapmax #39).
+    // `list` = [{ east, north (m from the eye), id }].
+    setNavPois(list) {
+        this._navPois = Array.isArray(list) ? list.slice(0, MAX_POIS) : [];
+        this._map.triggerRepaint();
+    }
+
+    // The id of the arrow or POI dot under screen pixel (px, py), or null. Ray-
+    // casts the floor with the same view maths as the shader (works at any pitch).
+    groundPick(px, py) {
+        const g = this.groundPointAt(px, py);
+        if (!g) return null;
         for (const a of this._navArrows) {
             const br = a.bearing * Math.PI / 180;
             const ap = [ARROW_GROUND_DIST * Math.sin(br), ARROW_GROUND_DIST * Math.cos(br)];
@@ -413,6 +468,8 @@ export class Photosphere {
         // The image centre's world azimuth may differ from the look/travel
         // heading (backward-mounted cameras, sun-compass corrected — #66).
         this._panoYawDeg = (target && typeof target.panoYaw === 'number') ? target.panoYaw : heading;
+        this._panoPitchDeg = (target && typeof target.panoPitch === 'number') ? target.panoPitch : 0;
+        this._panoRollDeg = (target && typeof target.panoRoll === 'number') ? target.panoRoll : 0;
         this._pitchDeg = 0;
         this._recalibrateLookTargetDistance();
         const { lngLat, zoom, eyeHeight, onEnter } = this._options;
@@ -437,6 +494,8 @@ export class Photosphere {
         // Orient the next sphere by its own heading during the crossfade (#52).
         this._panoYawDeg2 = typeof target.panoYaw === 'number' ? target.panoYaw
             : typeof target.bearing === 'number' ? target.bearing : this._panoYawDeg;
+        this._panoPitchDeg2 = typeof target.panoPitch === 'number' ? target.panoPitch : 0;
+        this._panoRollDeg2 = typeof target.panoRoll === 'number' ? target.panoRoll : 0;
         this._tilesNext = target.tiles || null;
         this._loadInto('texture2', target.imageUrl, (err) => {
             if (this._mode !== 'inside') return;
@@ -498,9 +557,11 @@ export class Photosphere {
         }
         this._options.lngLat = toAnchor;
         this._options.imageUrl = imageUrl;
-        // Promote the next pano's heading to current (#52).
+        // Promote the next pano's heading and pose to current (#52).
         if (typeof target.panoYaw === 'number') this._panoYawDeg = target.panoYaw;
         else if (typeof target.bearing === 'number') this._panoYawDeg = target.bearing;
+        this._panoPitchDeg = this._panoPitchDeg2;
+        this._panoRollDeg = this._panoRollDeg2;
         this._endTransitionState();
         this._recalibrateLookTargetDistance();
         this._updateCameraWhileInside();
@@ -674,7 +735,7 @@ export class Photosphere {
         const wanted = visibleTiles({
             yawDeg: this._yawDeg,
             pitchDeg: this._pitchDeg,
-            panoYawDeg: this._panoYawDeg,
+            panoRot: panoPoseMatrix(this._panoYawDeg, this._panoPitchDeg, this._panoRollDeg),
             fovDeg: this._options.fov,
             aspect,
             cols: state.tiles.cols,
@@ -756,7 +817,7 @@ export class Photosphere {
 
                 this.aPosition = gl.getAttribLocation(this.program, 'aPosition');
                 this.uniforms = {};
-                for (const name of ['uYaw', 'uPitch', 'uFovY', 'uAspect', 'uAlpha', 'uSphereCenterOffset', 'uSphereRadius', 'uPanorama', 'uSphereCenterOffset2', 'uPanorama2', 'uMix', 'uPanoYaw', 'uPanoYaw2', 'uWalkDir', 'uEyeHeight', 'uArrowCount', 'uArrows', 'uPoiCount', 'uPois']) {
+                for (const name of ['uYaw', 'uPitch', 'uFovY', 'uAspect', 'uAlpha', 'uSphereCenterOffset', 'uSphereRadius', 'uPanorama', 'uSphereCenterOffset2', 'uPanorama2', 'uMix', 'uPanoRot', 'uPanoRot2', 'uWalkDir', 'uEyeHeight', 'uArrowCount', 'uArrows', 'uPoiCount', 'uPois']) {
                     this.uniforms[name] = gl.getUniformLocation(this.program, name);
                 }
 
@@ -817,8 +878,10 @@ export class Photosphere {
                 gl.uniform1i(this.uniforms.uPanorama2, 1);
                 gl.uniform3f(this.uniforms.uSphereCenterOffset2, ...self._sphereCenterOffset2);
                 gl.uniform1f(this.uniforms.uMix, self._mix);
-                gl.uniform1f(this.uniforms.uPanoYaw, self._panoYawDeg * Math.PI / 180);
-                gl.uniform1f(this.uniforms.uPanoYaw2, self._panoYawDeg2 * Math.PI / 180);
+                gl.uniformMatrix3fv(this.uniforms.uPanoRot, false,
+                    panoPoseMatrix(self._panoYawDeg, self._panoPitchDeg, self._panoRollDeg));
+                gl.uniformMatrix3fv(this.uniforms.uPanoRot2, false,
+                    panoPoseMatrix(self._panoYawDeg2, self._panoPitchDeg2, self._panoRollDeg2));
                 gl.uniform2f(this.uniforms.uWalkDir, self._walkDir[0], self._walkDir[1]);
 
                 // Ground navigation arrows (mapmax #26): positions on the floor,
@@ -951,6 +1014,20 @@ export class Photosphere {
             return;
         }
         const { dragSensitivity, minPitch, maxPitch } = this._options;
+        // Pose-edit mode: the drag manipulates the PHOTO, not the camera —
+        // deltas go to the editor callback (see setPoseEditDrag).
+        if (this._poseEditDrag) {
+            const prevX = this._lastX, prevY = this._lastY;
+            const dxDeg = (event.clientX - prevX) * dragSensitivity;
+            const dyDeg = (event.clientY - prevY) * dragSensitivity;
+            this._lastX = event.clientX;
+            this._lastY = event.clientY;
+            this._poseEditDrag(dxDeg, dyDeg, {
+                x: event.clientX, y: event.clientY, prevX, prevY,
+                shiftKey: !!event.shiftKey,
+            });
+            return;
+        }
         this._yawDeg = (this._yawDeg - (event.clientX - this._lastX) * dragSensitivity + 360) % 360;
         this._pitchDeg = Math.max(minPitch, Math.min(maxPitch,
             this._pitchDeg + (event.clientY - this._lastY) * dragSensitivity));
