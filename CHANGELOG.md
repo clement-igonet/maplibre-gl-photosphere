@@ -3,6 +3,9 @@
 ## main
 
 ### ✨ Features and improvements
+- `setNavPois`: per-dot `color` ([r, g, b] 0..1, optional — defaults to the
+  historical blue) so hosts can keep one color language between their map
+  layers and the immersive floor dots (e.g. one color per imagery source).
 - _...Add new stuff here..._
 
 ### 🐞 Bug fixes

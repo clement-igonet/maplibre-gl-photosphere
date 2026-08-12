@@ -60,6 +60,7 @@ const FRAGMENT_SHADER_SOURCE = `
     uniform vec2 uArrows[${MAX_ARROWS}]; // ground positions (east, north) m from the eye
     uniform int uPoiCount;
     uniform vec2 uPois[${MAX_POIS}];     // neighbour-pano ground positions (east, north) m
+    uniform vec3 uPoiColors[${MAX_POIS}]; // per-dot disc color (default blue)
 
     // Ray-cast one panorama sphere; returns rgb + hit-alpha (a = 0 on a miss).
     // panoRot is the world→camera rotation of the capture pose (yaw from the
@@ -144,7 +145,7 @@ const FRAGMENT_SHADER_SOURCE = `
                 if (i >= uPoiCount) break;
                 float d = length(g - uPois[i]);
                 if (d < ${POI_RADIUS_M.toFixed(2)}) {
-                    rgb = mix(rgb, vec3(0.16, 0.4, 1.0), 0.9);
+                    rgb = mix(rgb, uPoiColors[i], 0.9);
                     a = max(a, 0.9);
                 } else if (d < ${(POI_RADIUS_M + 0.16).toFixed(2)}) {
                     rgb = mix(rgb, vec3(1.0), 0.9);      // white rim
@@ -223,7 +224,7 @@ export class Photosphere {
         this._blend = 1; // steady-state opacity while inside (1 = photo only)
         this._savedFov = null; // map's vertical FOV before entering
         this._navArrows = []; // [{ bearing (deg), id }] rendered on the floor
-        this._navPois = []; //   [{ east, north (m from eye), id }] floor dots
+        this._navPois = []; //   [{ east, north (m from eye), id, color? }] floor dots
         this._sphereCenterOffset = [0, 0, 0];
         this._sphereCenterOffset2 = [0, 0, 0]; // next pano while walking (#5b)
         this._mix = 0; // crossfade weight during a walk transition
@@ -369,7 +370,10 @@ export class Photosphere {
     }
 
     // Neighbour-panorama dots rendered on the floor (mapmax #39).
-    // `list` = [{ east, north (m from the eye), id }].
+    // `list` = [{ east, north (m from the eye), id, color? }] where `color` is
+    // an optional [r, g, b] (0..1) per dot — lets callers keep one color
+    // language across map and immersive view (e.g. per imagery source);
+    // omitted → the historical blue.
     setNavPois(list) {
         this._navPois = Array.isArray(list) ? list.slice(0, MAX_POIS) : [];
         this._map.triggerRepaint();
@@ -818,7 +822,7 @@ export class Photosphere {
 
                 this.aPosition = gl.getAttribLocation(this.program, 'aPosition');
                 this.uniforms = {};
-                for (const name of ['uYaw', 'uPitch', 'uFovY', 'uAspect', 'uAlpha', 'uSphereCenterOffset', 'uSphereRadius', 'uPanorama', 'uSphereCenterOffset2', 'uPanorama2', 'uMix', 'uPanoRot', 'uPanoRot2', 'uWalkDir', 'uEyeHeight', 'uArrowCount', 'uArrows', 'uPoiCount', 'uPois']) {
+                for (const name of ['uYaw', 'uPitch', 'uFovY', 'uAspect', 'uAlpha', 'uSphereCenterOffset', 'uSphereRadius', 'uPanorama', 'uSphereCenterOffset2', 'uPanorama2', 'uMix', 'uPanoRot', 'uPanoRot2', 'uWalkDir', 'uEyeHeight', 'uArrowCount', 'uArrows', 'uPoiCount', 'uPois', 'uPoiColors']) {
                     this.uniforms[name] = gl.getUniformLocation(this.program, name);
                 }
 
@@ -902,11 +906,18 @@ export class Photosphere {
                 const np = Math.min(MAX_POIS, self._navPois.length);
                 gl.uniform1i(this.uniforms.uPoiCount, np);
                 const pbuf = new Float32Array(MAX_POIS * 2);
+                const cbuf = new Float32Array(MAX_POIS * 3);
                 for (let i = 0; i < np; i++) {
                     pbuf[i * 2] = self._navPois[i].east;
                     pbuf[i * 2 + 1] = self._navPois[i].north;
+                    // Per-dot color, defaulting to the historical blue.
+                    const c = self._navPois[i].color || [0.16, 0.4, 1.0];
+                    cbuf[i * 3] = c[0];
+                    cbuf[i * 3 + 1] = c[1];
+                    cbuf[i * 3 + 2] = c[2];
                 }
                 gl.uniform2fv(this.uniforms.uPois, pbuf);
+                gl.uniform3fv(this.uniforms.uPoiColors, cbuf);
 
                 gl.drawArrays(gl.TRIANGLES, 0, 3);
                 gl.disable(gl.BLEND);
