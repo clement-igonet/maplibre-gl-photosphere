@@ -1,6 +1,16 @@
+## main
+### ✨ Features and improvements
+- _...Add new stuff here..._
+
+### 🐞 Bug fixes
+- _...Add new stuff here..._
+
+- Restore the demo blend slider + viewer-only wording (lost in a concurrent force-push) ([#5](https://github.com/clement-igonet/maplibre-gl-photosphere/pull/5)) (by [@clement-igonet](https://github.com/clement-igonet))
+- 0.4.0: capture-pose model + editor API ([#4](https://github.com/clement-igonet/maplibre-gl-photosphere/pull/4)) (by [@clement-igonet](https://github.com/clement-igonet))
+- 0.4.0: capture-pose model + editor API ([#4](https://github.com/clement-igonet/maplibre-gl-photosphere/pull/4)) (by [@clement-igonet](https://github.com/clement-igonet))
 # Changelog
 
-## main
+## 0.4.0
 
 Capture-pose RENDERING and viewer hooks. This plugin stays a source-agnostic
 360° viewer: it can *display* a corrected pose/position wherever the data came
