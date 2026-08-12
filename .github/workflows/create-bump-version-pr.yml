@@ -4,6 +4,13 @@ name: Create bump version PR
 # opens a PR that bumps package.json and turns CHANGELOG.md's "## main"
 # section into the new version. Merging that PR to main triggers release.yml
 # (npm publish + tag + GitHub Release).
+#
+# The reusable workflow pushes a branch and opens a PR with GITHUB_TOKEN, so
+# the caller must grant write (and the repo must allow Actions to create PRs).
+permissions:
+  contents: write
+  pull-requests: write
+
 on:
   workflow_dispatch:
     inputs:
