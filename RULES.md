@@ -53,6 +53,9 @@ ssh maplibre 'cd ~/projects/maplibre-gl-js/maplibre-plugin-photosphere && podman
 - **After every finished action, suggest the next GitHub issue/PR to work
   on** — pick from the open issues/PRs across maplibre-gl-photosphere,
   maplibre-gl-panoramax and mapmax, and say why it is next.
+- **Always hyperlink issue/PR references** — every mention of an issue or PR
+  links to it (e.g. [mapmax#110](https://github.com/clement-igonet/mapmax/issues/110)),
+  so one click gets there.
 - **Don't prompt when the only answers are yes / "yes, allow script
   execution" / no** — the default is yes, and yes on executing scripts.
   Prompt only when the choice offers answers beyond those (a real decision
