@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Street view with Panoramax + maplibre-gl-photosphere</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css">
+    <link rel="icon" href="data:,">
+    <style>
+        body { margin: 0; padding: 0; }
+        html, body, #map { height: 100%; }
+        #hint {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1;
+            background: rgba(0, 0, 0, .6);
+            color: #fff;
+            padding: 8px 12px;
+            font: 13px/1.4 system-ui, sans-serif;
+            border-radius: 4px;
+            max-width: 320px;
+        }
+        #nav {
+            position: absolute;
+            bottom: 18px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 1;
+            display: none;
+            gap: 8px;
+        }
+        #nav button {
+            font: 600 15px system-ui, sans-serif;
+            color: #fff;
+            background: rgba(0, 0, 0, .65);
+            border: none;
+            border-radius: 8px;
+            padding: 10px 16px;
+            cursor: pointer;
+        }
+        #nav button:disabled { opacity: .4; cursor: default; }
+    #nav label { display: flex; align-items: center; gap: 6px; color: #fff; font-size: 12px; }
+    #nav input[type=range] { width: 90px; }
+    </style>
+    <script src="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js"></script>
+    <script type="importmap">
+        {
+            "imports": {
+                "maplibre-gl": "./maplibre-gl-shim.js",
+                "maplibre-gl-photosphere": "../src/index.js"
+            }
+        }
+    </script>
+</head>
+<body>
+<div id="map"></div>
+<div id="hint">Loading a Panoramax street sequence…</div>
+<div id="nav">
+    <button id="prev" type="button">◀ Back</button>
+    <button id="next" type="button">Forward ▶</button>
+    <label id="blendbox" title="Photo ↔ map mix (blend API)">
+        <input id="blend" type="range" min="0" max="100" value="70"> photo ↔ map
+    </label>
+    <button id="exit" type="button">Exit</button>
+</div>
+
+<script type="module">
+    import {Photosphere} from 'maplibre-gl-photosphere';
+
+    // A continuous walk of open 360° street imagery from Panoramax
+    // (OpenStreetMap-France ecosystem), around the 10th arrondissement, Paris.
+    const API = 'https://api.panoramax.xyz/api';
+    const COLLECTION = 'a5dc43dc-d62e-457b-ad15-822bd7ced0db';
+
+    const hint = document.getElementById('hint');
+    const nav = document.getElementById('nav');
+
+    const response = await fetch(`${API}/collections/${COLLECTION}/items?limit=100`);
+    const collection = await response.json();
+    // Keep only equirectangular 360° pictures; they come back in capture order.
+    // Each picture's tiled HD derivate (STAC tiled-assets: a col/row grid plus
+    // a {TileCol}/{TileRow} URL template) feeds the plugin's progressive
+    // refinement: the SD base shows immediately, HD tiles stream in on look.
+    function tilesConfig(f) {
+        const matrix = f.properties['tiles:tile_matrix_sets']?.geovisio?.tileMatrix?.[0];
+        const template = (f.asset_templates?.tiles_webp || f.asset_templates?.tiles)?.href;
+        if (!matrix || !template) return null;
+        return {
+            width: Math.round(matrix.matrixWidth * matrix.tileWidth),
+            cols: matrix.matrixWidth,
+            rows: matrix.matrixHeight,
+            url: (col, row) => template.replace(/\{TileCol\}/g, col).replace(/\{TileRow\}/g, row)
+        };
+    }
+    const sequence = collection.features
+        .filter((f) => f.properties.exif?.['Xmp.GPano.ProjectionType'] === 'equirectangular')
+        .map((f) => ({
+            lngLat: f.geometry.coordinates,
+            imageUrl: f.assets.sd?.href || f.assets.hd.href,
+            bearing: f.properties['view:azimuth'] ?? 0,
+            tiles: tilesConfig(f)
+        }));
+
+    const map = new maplibregl.Map({
+        container: 'map',
+        style: {
+            version: 8,
+            sources: {
+                osm: {
+                    type: 'raster',
+                    tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+                    tileSize: 256,
+                    maxzoom: 19,
+                    attribution: '&copy; OpenStreetMap contributors | Imagery: Panoramax'
+                }
+            },
+            layers: [{id: 'osm', type: 'raster', source: 'osm'}]
+        },
+        center: sequence[0].lngLat,
+        zoom: 18,
+        pitch: 55,
+        bearing: 0,
+        minPitch: 5,
+        maxPitch: 175,
+        centerClampedToGround: false
+    });
+
+    let index = 0;
+
+    const photosphere = new Photosphere(map, {
+        lngLat: sequence[0].lngLat,
+        imageUrl: sequence[0].imageUrl,
+        tiles: sequence[0].tiles,
+        exitView: {center: sequence[0].lngLat, zoom: 17, pitch: 55, bearing: 0},
+        onEnter: () => { hint.textContent = 'Drag to look around — HD tiles sharpen where you look. Click a ground arrow / blue dot (or Forward / Back) to walk.'; nav.style.display = 'flex'; setRouteVisible('none'); refreshGroundNav(); photosphere.blend(blendInput.value / 100); },
+        onExit: () => { hint.textContent = 'Click a point on the route to step into the street.'; nav.style.display = 'none'; setRouteVisible('visible'); photosphere.setNavPois([]); photosphere.setNavArrows([]); }
+    });
+
+    // 0.4.0 demo — photo ↔ map blending: the photosphere renders semi-
+    // transparent over the MapLibre layers, so the street imagery and the map
+    // mix in one view (and pose edits can be judged against the map). The
+    // slider defaults to a visible mix.
+    const blendInput = document.getElementById('blend');
+    blendInput.addEventListener('input', () => photosphere.blend(blendInput.value / 100));
+
+    // Ground navigation inside the photosphere: a blue dot on the street at
+    // each adjacent panorama's real position, plus a walk arrow toward it.
+    // Positions are metres (east, north) from the current eye.
+    function offsetMeters(from, to) {
+        const mPerDegLat = 111320;
+        const mPerDegLng = mPerDegLat * Math.cos(from[1] * Math.PI / 180);
+        return {east: (to[0] - from[0]) * mPerDegLng, north: (to[1] - from[1]) * mPerDegLat};
+    }
+
+    function refreshGroundNav() {
+        const here = sequence[index].lngLat;
+        const pois = [];
+        const arrows = [];
+        for (const [id, i] of [['prev', index - 1], ['next', index + 1]]) {
+            if (i < 0 || i >= sequence.length) continue;
+            const {east, north} = offsetMeters(here, sequence[i].lngLat);
+            pois.push({east, north, id});
+            arrows.push({bearing: Math.atan2(east, north) * 180 / Math.PI, id});
+        }
+        photosphere.setNavPois(pois);
+        photosphere.setNavArrows(arrows);
+    }
+
+    // Click (not drag) on an arrow or dot walks there; hovering one shows a
+    // pointer cursor. groundPick ray-casts the floor with the shader's maths.
+    let pressAt = null;
+    const canvasPoint = (event) => {
+        const rect = map.getCanvas().getBoundingClientRect();
+        return [event.clientX - rect.left, event.clientY - rect.top];
+    };
+    map.getContainer().addEventListener('mousedown', (event) => { pressAt = [event.clientX, event.clientY]; });
+    map.getContainer().addEventListener('mouseup', (event) => {
+        const from = pressAt;
+        pressAt = null;
+        if (!from || photosphere.mode !== 'inside') return;
+        if (Math.hypot(event.clientX - from[0], event.clientY - from[1]) > 5) return;
+        const picked = photosphere.groundPick(...canvasPoint(event));
+        if (picked === 'next') move(1);
+        else if (picked === 'prev') move(-1);
+    });
+    map.getContainer().addEventListener('mousemove', (event) => {
+        if (photosphere.mode !== 'inside' || pressAt) return;
+        map.getCanvas().style.cursor = photosphere.groundPick(...canvasPoint(event)) ? 'pointer' : '';
+    });
+
+    const prevButton = document.getElementById('prev');
+    const nextButton = document.getElementById('next');
+
+    function refreshNav() {
+        prevButton.disabled = index <= 0;
+        nextButton.disabled = index >= sequence.length - 1;
+    }
+
+    function move(delta) {
+        const target = index + delta;
+        if (target < 0 || target >= sequence.length) return;
+        index = target;
+        // Old dots are relative to the old eye — hide them during the walk;
+        // onMove restores them at the new position on arrival.
+        photosphere.setNavPois([]);
+        photosphere.setNavArrows([]);
+        photosphere.goTo(sequence[index]);
+        map.getSource('sequence-here')?.setData(pointFeature(index));
+        refreshNav();
+    }
+
+    function pointFeature(i) {
+        return {type: 'Feature', geometry: {type: 'Point', coordinates: sequence[i].lngLat}};
+    }
+
+    // The route overlay layers are added after the photosphere custom layer, so
+    // they render on top; hide them while immersed and restore them on exit.
+    function setRouteVisible(visibility) {
+        for (const id of ['route', 'points', 'here']) {
+            if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', visibility);
+        }
+    }
+
+    map.on('load', () => {
+        map.addSource('route', {type: 'geojson', data: {type: 'Feature', geometry: {type: 'LineString', coordinates: sequence.map((p) => p.lngLat)}}});
+        map.addLayer({id: 'route', type: 'line', source: 'route', paint: {'line-color': '#2266ff', 'line-width': 4, 'line-opacity': 0.8}});
+
+        map.addSource('points', {type: 'geojson', data: {type: 'FeatureCollection', features: sequence.map((p, i) => ({type: 'Feature', properties: {i}, geometry: {type: 'Point', coordinates: p.lngLat}}))}});
+        map.addLayer({id: 'points', type: 'circle', source: 'points', paint: {'circle-radius': 4, 'circle-color': '#fff', 'circle-stroke-color': '#2266ff', 'circle-stroke-width': 2}});
+
+        map.addSource('sequence-here', {type: 'geojson', data: pointFeature(0)});
+        map.addLayer({id: 'here', type: 'circle', source: 'sequence-here', paint: {'circle-radius': 7, 'circle-color': '#ff3355'}});
+
+        hint.textContent = 'Click a point on the route to step into the street.';
+        map.on('click', 'points', (event) => {
+            if (photosphere.mode !== 'outside') return;
+            index = event.features[0].properties.i;
+            map.getSource('sequence-here').setData(pointFeature(index));
+            refreshNav();
+            photosphere.enter(sequence[index]);
+        });
+        map.on('mouseenter', 'points', () => { map.getCanvas().style.cursor = 'pointer'; });
+        map.on('mouseleave', 'points', () => { map.getCanvas().style.cursor = ''; });
+    });
+
+    // Keep the "here" dot and the in-sphere ground nav in sync on arrival.
+    photosphere._options.onMove = () => {
+        map.getSource('sequence-here')?.setData(pointFeature(index));
+        refreshGroundNav();
+    };
+
+    prevButton.addEventListener('click', () => move(-1));
+    nextButton.addEventListener('click', () => move(1));
+    document.getElementById('exit').addEventListener('click', () => photosphere.exit());
+    refreshNav();
+</script>
+</body>
+</html>
