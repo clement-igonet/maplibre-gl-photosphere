@@ -1,0 +1,19 @@
+name: CI
+
+# Every PR and main push: the vitest suite. Release gating stays in
+# release.yml; this is the pre-merge gate.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci --no-audit --no-fund
+      - run: npx vitest run
