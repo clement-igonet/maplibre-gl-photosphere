@@ -53,8 +53,10 @@ ssh maplibre 'cd ~/projects/maplibre-gl-js/maplibre-plugin-photosphere && podman
 - **After every finished action, suggest the next GitHub issue/PR to work
   on** — pick from the open issues/PRs across maplibre-gl-photosphere,
   maplibre-gl-panoramax and mapmax, and say why it is next.
-- **Don't prompt for plain yes/no** — executing scripts/commands is yes by
-  default. Prompt only for real decisions with more than one viable answer.
+- **Don't prompt when the only answers are yes / "yes, allow script
+  execution" / no** — the default is yes, and yes on executing scripts.
+  Prompt only when the choice offers answers beyond those (a real decision
+  between alternatives).
 - Features are additive; keep the existing API intact (see CHANGELOG.md).
 - `src/` ships as-is (no build step): plain ES modules, no TypeScript syntax.
 - Pure logic that tests need (e.g. `src/tiles.js`) lives in its own module,
