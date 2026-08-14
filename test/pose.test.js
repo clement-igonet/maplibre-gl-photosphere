@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {normalizeYaw, panoPoseMatrix, poseTransform} from '../src/pose.js';
+import {flatTanHalf, flatUV, normalizeYaw, panoPoseMatrix, poseTransform} from '../src/pose.js';
 
 const close = (a, b, eps = 1e-9) => expect(Math.abs(a - b)).toBeLessThan(eps);
 
@@ -41,5 +41,38 @@ describe('panoPoseMatrix', () => {
     test('valid at pitch ±90 (no degenerate cross product)', () => {
         const nc = poseTransform(panoPoseMatrix(0, 90, 0), [0, 0, 1]);
         close(nc[1], 1);
+    });
+});
+
+describe('flat pictures (#3)', () => {
+    
+    const level = panoPoseMatrix(0, 0, 0);
+
+    test('capture forward maps to the image centre', () => {
+        expect(flatUV([0, 1, 0], level, 1, 0.75)).toEqual([0.5, 0.5]);
+    });
+
+    test('window edges land on u = 0/1; outside and behind are null', () => {
+        const [th] = flatTanHalf(true, 90, null, {width: 4, height: 3});
+        const edge = flatUV(azDir(45), level, th, th * 0.75); // hfov/2 = 45°
+        close(edge[0], 1);
+        close(edge[1], 0.5);
+        expect(flatUV(azDir(60), level, th, th * 0.75)).toBeNull();  // outside
+        expect(flatUV(azDir(180), level, th, th * 0.75)).toBeNull(); // behind
+    });
+
+    test('the window follows the capture pose', () => {
+        const east = panoPoseMatrix(90, 0, 0);
+        expect(flatUV(azDir(90), east, 1, 0.75)).toEqual([0.5, 0.5]);
+        expect(flatUV([0, 1, 0], east, 0.5, 0.5)).toBeNull(); // north is off-window
+    });
+
+    test('flatTanHalf: vfov from image aspect, explicit vfov wins, 360 → [1,1]', () => {
+        const [th, tv] = flatTanHalf(true, 90, null, {width: 4000, height: 3000});
+        close(th, 1);
+        close(tv, 0.75);
+        const explicit = flatTanHalf(true, 90, 60, {width: 4000, height: 3000});
+        close(explicit[1], Math.tan(Math.PI / 6), 1e-9);
+        expect(flatTanHalf(false, 90, null, null)).toEqual([1, 1]);
     });
 });
