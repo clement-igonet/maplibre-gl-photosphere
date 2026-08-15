@@ -1,6 +1,14 @@
+## main
+### ✨ Features and improvements
+- _...Add new stuff here..._
+
+### 🐞 Bug fixes
+- _...Add new stuff here..._
+
+- #3: flat pictures — gnomonic perspective window in the sphere shader ([#7](https://github.com/clement-igonet/maplibre-gl-photosphere/pull/7)) (by [@clement-igonet](https://github.com/clement-igonet))
 # Changelog
 
-## main
+## 0.5.0
 
 ### ✨ Features and improvements
 - **Flat (non-360) pictures** ([#3](https://github.com/clement-igonet/maplibre-gl-photosphere/issues/3)):
@@ -15,10 +23,8 @@
 - `setNavPois`: per-dot `color` ([r, g, b] 0..1, optional — defaults to the
   historical blue) so hosts can keep one color language between their map
   layers and the immersive floor dots (e.g. one color per imagery source).
-- _...Add new stuff here..._
 
 ### 🐞 Bug fixes
-- _...Add new stuff here..._
 
 ## 0.4.0
 

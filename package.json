@@ -1,6 +1,6 @@
 {
   "name": "maplibre-gl-photosphere",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Immersive 360-degree photosphere plugin for MapLibre GL JS: enter a panorama anchored at a geographic point, look around, exit back to the map",
   "type": "module",
   "main": "src/index.js",
