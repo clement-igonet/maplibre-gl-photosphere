@@ -3,6 +3,15 @@
 ## main
 
 ### ✨ Features and improvements
+- **Flat (non-360) pictures** ([#3](https://github.com/clement-igonet/maplibre-gl-photosphere/issues/3)):
+  targets take `projection: 'flat'` + `hfov` (deg; `vfov` derived from the
+  loaded image's aspect unless given) and render as a gnomonic perspective
+  window around the capture pose — outside the window the vector map shows
+  through. Pose corrections (`setPanoPose`) level flat photos exactly like
+  360s; walks crossfade between projections; tiled refinement is skipped for
+  flat pictures (single sd/hd image). Pure twins exported: `flatUV()` (which
+  pixel a world direction hits, or null) and `flatTanHalf()`. The street-view
+  demo no longer filters sequences to 360°-only.
 - `setNavPois`: per-dot `color` ([r, g, b] 0..1, optional — defaults to the
   historical blue) so hosts can keep one color language between their map
   layers and the immersive floor dots (e.g. one color per imagery source).

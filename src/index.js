@@ -12,7 +12,7 @@
 // full-panorama atlas seeded with the base image and visible tiles stream in.
 import { MercatorCoordinate } from 'maplibre-gl';
 import { visibleTiles } from './tiles.js';
-import { panoPoseMatrix } from './pose.js';
+import { flatTanHalf, panoPoseMatrix } from './pose.js';
 
 export * from './pose.js';
 
@@ -54,6 +54,10 @@ const FRAGMENT_SHADER_SOURCE = `
     uniform float uMix;            // 0 = current pano only, 1 = next pano only
     uniform mat3 uPanoRot;         // world→camera capture pose of the current image (yaw + pitch/roll)
     uniform mat3 uPanoRot2;        // ...and the next image's, during a walk
+    uniform float uFlat;           // 1 = flat picture (gnomonic window), 0 = equirectangular (#3)
+    uniform float uFlat2;          // ...for the walk target
+    uniform vec2 uTanHalf;         // tan(hfov/2), tan(vfov/2) of the current flat picture
+    uniform vec2 uTanHalf2;        // ...of the walk target
     uniform vec2 uWalkDir;         // unit horizontal travel direction (east, north) during a walk (#64)
     uniform float uEyeHeight;      // eye height above the ground (m)
     uniform int uArrowCount;
@@ -67,7 +71,7 @@ const FRAGMENT_SHADER_SOURCE = `
     // image-centre azimuth, plus pitch/roll — built by panoPoseMatrix): applying
     // it to the hit direction expresses it in the capture-camera frame, aligning
     // the photo to the world and levelling a tilted capture.
-    vec4 sampleSphere(vec3 viewDir, vec3 centerOffset, sampler2D tex, mat3 panoRot) {
+    vec4 sampleSphere(vec3 viewDir, vec3 centerOffset, sampler2D tex, mat3 panoRot, float flatPic, vec2 tanHalf) {
         vec3 originToCenter = -centerOffset;
         float b = dot(originToCenter, viewDir);
         float c = dot(originToCenter, originToCenter) - uSphereRadius * uSphereRadius;
@@ -80,6 +84,18 @@ const FRAGMENT_SHADER_SOURCE = `
         if (t < 0.0) return vec4(0.0);
         vec3 normal = normalize(viewDir * t - centerOffset);
         vec3 nc = panoRot * normal;   // world dir → capture-camera frame
+        // Flat pictures (#3): a pinhole capture is a gnomonic window around
+        // the capture pose. Outside the window (or behind the picture plane)
+        // the sample is transparent, so the vector map shows through — the
+        // photo occupies only the solid angle it was actually shot over.
+        if (flatPic > 0.5) {
+            if (nc.y <= 0.0) return vec4(0.0);
+            vec2 uv = vec2(0.5 + 0.5 * (nc.x / nc.y) / tanHalf.x,
+                           0.5 - 0.5 * (nc.z / nc.y) / tanHalf.y);
+            if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return vec4(0.0);
+            vec4 flatColor = texture2D(tex, uv);
+            return vec4(flatColor.rgb, flatColor.a);
+        }
         float theta = atan(nc.x, nc.y);
         float phi = asin(clamp(nc.z, -1.0, 1.0));
         vec4 color = texture2D(tex, vec2(0.5 + theta / (2.0 * 3.14159265359), 0.5 - phi / 3.14159265359));
@@ -121,12 +137,12 @@ const FRAGMENT_SHADER_SOURCE = `
             vec3 wd = vec3(uWalkDir.x, uWalkDir.y, 0.0);
             vec3 d1 = normalize(viewDir + wd * (0.85 * uMix));         // zoom in, growing
             vec3 d2 = normalize(viewDir - wd * (0.30 * (1.0 - uMix))); // settle from wide
-            vec4 s1 = sampleSphere(d1, vec3(0.0), uPanorama, uPanoRot);
-            vec4 s2 = sampleSphere(d2, vec3(0.0), uPanorama2, uPanoRot2);
+            vec4 s1 = sampleSphere(d1, vec3(0.0), uPanorama, uPanoRot, uFlat, uTanHalf);
+            vec4 s2 = sampleSphere(d2, vec3(0.0), uPanorama2, uPanoRot2, uFlat2, uTanHalf2);
             rgb = mix(s1.rgb, s2.rgb, uMix);
             a = mix(s1.a, s2.a, uMix) * uAlpha;
         } else {
-            vec4 s1 = sampleSphere(viewDir, uSphereCenterOffset, uPanorama, uPanoRot);
+            vec4 s1 = sampleSphere(viewDir, uSphereCenterOffset, uPanorama, uPanoRot, uFlat, uTanHalf);
             rgb = s1.rgb;
             a = s1.a * uAlpha;
         }
@@ -235,6 +251,14 @@ export class Photosphere {
         this._panoRollDeg = 0;
         this._panoPitchDeg2 = 0; // ...the next image's, during a walk
         this._panoRollDeg2 = 0;
+        // Flat pictures (#3): a gnomonic window instead of the full sphere.
+        // hfov from the target; vfov derived from the loaded image's aspect.
+        this._flat = this._options.projection === 'flat';
+        this._hfovDeg = this._options.hfov ?? 70;
+        this._vfovDeg = this._options.vfov ?? null; // null → derive from image
+        this._flat2 = false; // ...the walk target's window
+        this._hfovDeg2 = 70;
+        this._vfovDeg2 = null;
         this._walkDir = [0, 0]; // unit (east, north) travel direction during a walk (#64)
         this._gl = null;
         this._layerCtx = null;
@@ -449,7 +473,11 @@ export class Photosphere {
             if (target.lngLat) this._options.lngLat = target.lngLat;
             if (target.imageUrl) {
                 this._options.imageUrl = target.imageUrl;
-                this._tiles = target.tiles || null;
+                // Flat window (#3): projection/hfov travel with the picture.
+                this._flat = target.projection === 'flat';
+                this._hfovDeg = target.hfov ?? (this._flat ? 70 : this._hfovDeg);
+                this._vfovDeg = target.vfov ?? null;
+                this._tiles = this._flat ? null : (target.tiles || null);
                 this._tileState = null;
                 this._tileEpoch++;
                 this._loadTexture(target.imageUrl);
@@ -501,7 +529,10 @@ export class Photosphere {
             : typeof target.bearing === 'number' ? target.bearing : this._panoYawDeg;
         this._panoPitchDeg2 = typeof target.panoPitch === 'number' ? target.panoPitch : 0;
         this._panoRollDeg2 = typeof target.panoRoll === 'number' ? target.panoRoll : 0;
-        this._tilesNext = target.tiles || null;
+        this._flat2 = target.projection === 'flat';
+        this._hfovDeg2 = target.hfov ?? 70;
+        this._vfovDeg2 = target.vfov ?? null;
+        this._tilesNext = this._flat2 ? null : (target.tiles || null);
         this._loadInto('texture2', target.imageUrl, (err) => {
             if (this._mode !== 'inside') return;
             if (err) { // fall back to an instant swap rather than getting stuck
@@ -567,6 +598,10 @@ export class Photosphere {
         else if (typeof target.bearing === 'number') this._panoYawDeg = target.bearing;
         this._panoPitchDeg = this._panoPitchDeg2;
         this._panoRollDeg = this._panoRollDeg2;
+        // Promote the flat window too (#3).
+        this._flat = this._flat2;
+        this._hfovDeg = this._hfovDeg2;
+        this._vfovDeg = this._vfovDeg2;
         this._endTransitionState();
         this._recalibrateLookTargetDistance();
         this._updateCameraWhileInside();
@@ -822,7 +857,7 @@ export class Photosphere {
 
                 this.aPosition = gl.getAttribLocation(this.program, 'aPosition');
                 this.uniforms = {};
-                for (const name of ['uYaw', 'uPitch', 'uFovY', 'uAspect', 'uAlpha', 'uSphereCenterOffset', 'uSphereRadius', 'uPanorama', 'uSphereCenterOffset2', 'uPanorama2', 'uMix', 'uPanoRot', 'uPanoRot2', 'uWalkDir', 'uEyeHeight', 'uArrowCount', 'uArrows', 'uPoiCount', 'uPois', 'uPoiColors']) {
+                for (const name of ['uYaw', 'uPitch', 'uFovY', 'uAspect', 'uAlpha', 'uSphereCenterOffset', 'uSphereRadius', 'uPanorama', 'uSphereCenterOffset2', 'uPanorama2', 'uMix', 'uPanoRot', 'uPanoRot2', 'uFlat', 'uFlat2', 'uTanHalf', 'uTanHalf2', 'uWalkDir', 'uEyeHeight', 'uArrowCount', 'uArrows', 'uPoiCount', 'uPois', 'uPoiColors']) {
                     this.uniforms[name] = gl.getUniformLocation(this.program, name);
                 }
 
@@ -888,6 +923,15 @@ export class Photosphere {
                 gl.uniformMatrix3fv(this.uniforms.uPanoRot2, false,
                     panoPoseMatrix(self._panoYawDeg2, self._panoPitchDeg2, self._panoRollDeg2));
                 gl.uniform2f(this.uniforms.uWalkDir, self._walkDir[0], self._walkDir[1]);
+
+                // Flat windows (#3): vfov derives from the loaded image aspect
+                // unless the target provided one.
+                const th1 = flatTanHalf(self._flat, self._hfovDeg, self._vfovDeg, this.textureImage);
+                const th2 = flatTanHalf(self._flat2, self._hfovDeg2, self._vfovDeg2, this.texture2Image);
+                gl.uniform1f(this.uniforms.uFlat, self._flat ? 1 : 0);
+                gl.uniform1f(this.uniforms.uFlat2, self._flat2 ? 1 : 0);
+                gl.uniform2f(this.uniforms.uTanHalf, th1[0], th1[1]);
+                gl.uniform2f(this.uniforms.uTanHalf2, th2[0], th2[1]);
 
                 // Ground navigation arrows (mapmax #26): positions on the floor,
                 // at a fixed distance toward each target bearing.

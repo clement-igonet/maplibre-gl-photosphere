@@ -49,3 +49,28 @@ export function poseTransform(m, v) {
         m[2] * v[0] + m[5] * v[1] + m[8] * v[2],
     ];
 }
+
+// --- Flat pictures (#3) ------------------------------------------------------
+
+// Half-tangents of a flat picture's gnomonic window: hfov comes from the
+// capture metadata; vfov derives from the actual image aspect unless given.
+// For equirectangular pictures returns [1, 1] (unused by the shader).
+export function flatTanHalf(flat, hfovDeg, vfovDeg, image) {
+    if (!flat) return [1, 1];
+    const th = Math.tan(((hfovDeg || 70) * Math.PI / 180) / 2);
+    const tv = vfovDeg
+        ? Math.tan((vfovDeg * Math.PI / 180) / 2)
+        : th * (image && image.width ? image.height / image.width : 0.75);
+    return [th, tv];
+}
+
+// Texture UV of a world direction on a flat picture (JS twin of the shader's
+// gnomonic branch): null when the direction is behind the picture plane or
+// outside the window. `m` is the capture pose from panoPoseMatrix.
+export function flatUV(dir, m, tanHalfH, tanHalfV) {
+    const nc = poseTransform(m, dir);
+    if (nc[1] <= 0) return null;
+    const u = 0.5 + 0.5 * (nc[0] / nc[1]) / tanHalfH;
+    const v = 0.5 - 0.5 * (nc[2] / nc[1]) / tanHalfV;
+    return (u < 0 || u > 1 || v < 0 || v > 1) ? null : [u, v];
+}
