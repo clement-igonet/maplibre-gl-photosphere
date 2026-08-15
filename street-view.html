@@ -93,14 +93,20 @@
             url: (col, row) => template.replace(/\{TileCol\}/g, col).replace(/\{TileRow\}/g, row)
         };
     }
+    // Flat (non-360) pictures render as a perspective window (#3) — no more
+    // filtering the sequence to equirectangular only.
     const sequence = collection.features
-        .filter((f) => f.properties.exif?.['Xmp.GPano.ProjectionType'] === 'equirectangular')
-        .map((f) => ({
-            lngLat: f.geometry.coordinates,
-            imageUrl: f.assets.sd?.href || f.assets.hd.href,
-            bearing: f.properties['view:azimuth'] ?? 0,
-            tiles: tilesConfig(f)
-        }));
+        .map((f) => {
+            const is360 = f.properties.exif?.['Xmp.GPano.ProjectionType'] === 'equirectangular';
+            return {
+                lngLat: f.geometry.coordinates,
+                imageUrl: f.assets.sd?.href || f.assets.hd.href,
+                bearing: f.properties['view:azimuth'] ?? 0,
+                projection: is360 ? undefined : 'flat',
+                hfov: is360 ? undefined : (parseFloat(f.properties['pers:interior_orientation']?.field_of_view) || 70),
+                tiles: is360 ? tilesConfig(f) : null
+            };
+        });
 
     const map = new maplibregl.Map({
         container: 'map',

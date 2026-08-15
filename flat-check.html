@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>flat-picture check — maplibre-gl-photosphere</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css">
+    <link rel="icon" href="data:,">
+    <style>
+        body { margin: 0; }
+        html, body, #map { height: 100%; }
+        #state { position: absolute; top: 8px; left: 8px; z-index: 1;
+                 background: rgba(0,0,0,.7); color: #fff; padding: 6px 10px;
+                 font: 12px system-ui; border-radius: 4px; }
+    </style>
+    <script src="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js"></script>
+    <script type="importmap">
+        {"imports": {"maplibre-gl": "./maplibre-gl-shim.js", "maplibre-gl-photosphere": "../src/index.js"}}
+    </script>
+</head>
+<body>
+<div id="map"></div>
+<div id="state">loading…</div>
+<script type="module">
+    // Visual QA page for flat pictures (#3): auto-enters a flat capture as a
+    // perspective window over the vector/raster map. Override via query:
+    // ?img=<url>&hfov=<deg>&bearing=<deg>&lng=<>&lat=<>&blend=<0..1>
+    import {Photosphere} from 'maplibre-gl-photosphere';
+
+    const q = new URLSearchParams(location.search);
+    const target = {
+        lngLat: [parseFloat(q.get('lng') ?? '2.350129424'), parseFloat(q.get('lat') ?? '48.854905336')],
+        imageUrl: q.get('img') ?? 'https://panoramax.ign.fr/api/pictures/760c70d4-7981-4742-8414-feafb79220a9/sd.jpg',
+        bearing: parseFloat(q.get('bearing') ?? '206'),
+        projection: 'flat',
+        hfov: parseFloat(q.get('hfov') ?? '95')
+    };
+
+    const map = new maplibregl.Map({
+        container: 'map',
+        style: {
+            version: 8,
+            sources: {osm: {type: 'raster', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, maxzoom: 19, attribution: '© OpenStreetMap | © Panoramax/IGN'}},
+            layers: [{id: 'osm', type: 'raster', source: 'osm'}]
+        },
+        center: target.lngLat, zoom: 18, pitch: 55,
+        minPitch: 5, maxPitch: 175, centerClampedToGround: false
+    });
+
+    const photosphere = new Photosphere(map, {
+        ...target,
+        durationMs: 600,
+        onEnter: () => { document.getElementById('state').textContent = 'inside (flat window)'; }
+    });
+    if (q.get('blend')) photosphere.blend(parseFloat(q.get('blend')));
+    window.photosphere = photosphere; // for automated checks
+    map.on('load', () => photosphere.enter(target));
+</script>
+</body>
+</html>
